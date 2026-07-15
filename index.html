@@ -1135,6 +1135,7 @@ var OVERLAY_VERT = [
 var OVERLAY_FRAG = [
   '#version 300 es',
   'precision highp float;',
+  'precision highp int;',   // match the vertex shader (default int differs by stage)
   'uniform sampler2D u_ov;',
   'uniform int u_mode;',      // 0 normal, 1 multiply, 2 screen, 3 add
   'uniform float u_opacity;',
@@ -1287,7 +1288,15 @@ function initGL() {
   gl.enableVertexAttribArray(0);
   gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
 }
-if (gl) initGL();
+if (gl) {
+  try {
+    initGL();
+  } catch (e) {
+    // Never let a GL init failure halt the rest of the UI (sliders, buttons).
+    gl = null;
+    console.error('initGL failed:', e);
+  }
+}
 
 function uploadTexture(img) {
   if (state.tex) gl.deleteTexture(state.tex);

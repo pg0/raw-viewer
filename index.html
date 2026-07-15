@@ -48,7 +48,27 @@
     display: flex;
     flex-direction: column;
   }
-  #canvaswrap { flex: 1; position: relative; overflow: hidden; }
+  #canvaswrap { flex: 1; position: relative; overflow: hidden; touch-action: none; }
+  /* Floating size toggle (mobile only): switch the photo pane between 2/3 and 1/3 */
+  #btnViewSize {
+    display: none;
+    position: absolute;
+    right: 10px; bottom: 10px;
+    z-index: 8;
+    background: rgba(20,20,20,.78);
+    color: #d8d8d8;
+    border: 1px solid #3a3a3a;
+    border-radius: 6px;
+    padding: 6px 9px;
+    font-size: 12px;
+    line-height: 1;
+    align-items: center;
+    gap: 5px;
+    cursor: pointer;
+    font-variant-numeric: tabular-nums;
+  }
+  #btnViewSize:hover { background: rgba(40,40,40,.9); }
+  #btnViewSize svg { width: 13px; height: 13px; display: block; }
   #glcanvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
   #thumb {
     position: absolute; inset: 0;
@@ -191,6 +211,8 @@
   .overlay-ctrls { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
   .overlay-ctrls select { flex: 1; background: #333; color: #ddd; border: 1px solid #444; border-radius: 5px; padding: 4px 6px; font-size: 11px; font-family: inherit; }
   .overlay-tile { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; color: #bbb; white-space: nowrap; }
+  .overlay-color { width: 26px; height: 22px; padding: 0; border: 1px solid #444; border-radius: 4px; background: #333; cursor: pointer; }
+  #overlaypanel.ovdrag { outline: 2px dashed #4a90d9; outline-offset: -2px; border-radius: 6px; background: rgba(74,144,217,.06); }
   .credit { margin-top: auto; padding-top: 8px; font-size: 11px; color: #666; text-align: center; line-height: 1.6; }
   .credit a { color: #7aa7d0; text-decoration: none; }
   .credit a:hover { text-decoration: underline; }
@@ -377,7 +399,10 @@
      below. Open / Save stay in the sticky top bar. */
   @media (max-width: 820px) {
     #app { flex-direction: column; }
-    #viewer { flex: 0 0 46vh; min-height: 0; }
+    #viewer { flex: 0 0 50vh; min-height: 0; }
+    #viewer.vh-lg { flex: 0 0 66vh; }
+    #viewer.vh-sm { flex: 0 0 33vh; }
+    #btnViewSize { display: flex; }
     #sidebar {
       width: 100%;
       flex: 1 1 auto;
@@ -416,6 +441,14 @@
         <p>RAW (ARW, CR2, NEF, DNG, RAF ...), JPEG, PNG, WebP, HEIC - or a .cube LUT</p>
       </div>
       <div id="zoomchip" hidden></div>
+      <button id="btnViewSize" title="Resize photo pane" aria-label="Resize photo pane">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+             stroke-linecap="round" stroke-linejoin="round">
+          <polyline points="4 10 4 4 10 4"></polyline>
+          <polyline points="20 14 20 20 14 20"></polyline>
+        </svg>
+        <span id="viewSizeLabel">1/3</span>
+      </button>
       <div id="cropoverlay" hidden>
         <div id="cropbox">
           <div class="crop-third crop-third-v" style="left:33.33%"></div>
@@ -534,7 +567,7 @@
 <input type="file" id="fileinput" hidden
   accept=".arw,.cr2,.cr3,.nef,.nrw,.dng,.raf,.orf,.rw2,.raw,.pef,.srw,.srf,.sr2,.kdc,.dcr,.mrw,.3fr,.erf,.mef,.mos,.x3f,.gpr,.rwl,.iiq,.cap,.fff,.arq,.jpg,.jpeg,.png,.webp,.bmp,.gif,.heic,.heif">
 <input type="file" id="lutinput" hidden accept=".cube">
-<input type="file" id="overlayinput" hidden accept="image/*">
+<input type="file" id="overlayinput" hidden accept="image/*,.svg,image/svg+xml">
 
 <script src="dcraw.js"></script>
 <script src="libheif.js"></script>
@@ -976,11 +1009,12 @@ var OVERLAY_VERT = [
   'uniform vec2 u_scale;',
   'uniform float u_zoom;',
   'uniform vec2 u_pan;',
-  'uniform vec2 u_ovScale;', // overlay UV scale/tiling (1 = stretch to fit)
+  'uniform vec2 u_ovScale;', // overlay UV scale/tiling (1 = stretch to fit, <1 = zoom in)
+  'uniform vec2 u_ovOffset;', // overlay UV offset (pan the texture)
   'out vec2 v_uv;',
   'void main() {',
   '  vec2 local = vec2(a_pos.x * 0.5 + 0.5, 0.5 - a_pos.y * 0.5);',
-  '  v_uv = (local - 0.5) * u_ovScale + 0.5;',
+  '  v_uv = (local - 0.5) * u_ovScale + 0.5 + u_ovOffset;',
   '  float c = cos(u_rot);',
   '  float s = sin(u_rot);',
   '  vec2 p = mat2(c, s, -s, c) * (a_pos * u_imgHalf);',
@@ -994,6 +1028,9 @@ var OVERLAY_FRAG = [
   'uniform int u_mode;',      // 0 normal, 1 multiply, 2 screen, 3 add
   'uniform float u_opacity;',
   'uniform int u_tile;',      // 1 = repeat, 0 = clamp (transparent outside)
+  'uniform int u_chromaOn;',  // 1 = key out a color to transparent
+  'uniform vec3 u_chroma;',   // keyed color (0..1)
+  'uniform float u_chromaThresh;',
   'in vec2 v_uv;',
   'out vec4 frag;',
   'void main() {',
@@ -1001,6 +1038,8 @@ var OVERLAY_FRAG = [
   '  if (u_tile == 0 && (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0)) { discard; }',
   '  vec4 t = texture(u_ov, uv);',
   '  float a = t.a * u_opacity;',
+  '  if (u_chromaOn == 1 && distance(t.rgb, u_chroma) <= u_chromaThresh) { a = 0.0; }',
+  '  if (a <= 0.0) { discard; }',
   // premultiply the output so fixed-function blending yields the right mode:
   '  if (u_mode == 1) { frag = vec4(mix(vec3(1.0), t.rgb, a), 1.0); }',      // multiply: blend DST_COLOR, ZERO
   '  else if (u_mode == 2) { frag = vec4(t.rgb * a, 1.0); }',                // screen: blend ONE, ONE_MINUS_SRC_COLOR
@@ -1105,10 +1144,14 @@ function initGL() {
     zoom: gl.getUniformLocation(ovProg, 'u_zoom'),
     pan: gl.getUniformLocation(ovProg, 'u_pan'),
     ovScale: gl.getUniformLocation(ovProg, 'u_ovScale'),
+    ovOffset: gl.getUniformLocation(ovProg, 'u_ovOffset'),
     ov: gl.getUniformLocation(ovProg, 'u_ov'),
     mode: gl.getUniformLocation(ovProg, 'u_mode'),
     opacity: gl.getUniformLocation(ovProg, 'u_opacity'),
-    tile: gl.getUniformLocation(ovProg, 'u_tile')
+    tile: gl.getUniformLocation(ovProg, 'u_tile'),
+    chromaOn: gl.getUniformLocation(ovProg, 'u_chromaOn'),
+    chroma: gl.getUniformLocation(ovProg, 'u_chroma'),
+    chromaThresh: gl.getUniformLocation(ovProg, 'u_chromaThresh')
   };
   gl.useProgram(ovProg);
   gl.uniform1i(ovUni.ov, 0); // overlays sample from texture unit 0
@@ -1255,8 +1298,23 @@ function drawOverlays(vpW, vpH, angleDeg, flipY, zoom, pan, crop) {
     gl.uniform1f(ovUni.opacity, ov.opacity);
     gl.uniform1i(ovUni.mode, ov.mode | 0);
     gl.uniform1i(ovUni.tile, ov.tile ? 1 : 0);
-    var sc = ov.tile ? (ov.scale || 1) : 1;
-    gl.uniform2f(ovUni.ovScale, sc, sc);
+    // Keep the overlay's own aspect (contain-fit) instead of stretching to the photo.
+    var bsx = 1, bsy = 1;
+    if (ov.keepAspect) {
+      var ovAR = (ov.w && ov.h) ? ov.w / ov.h : 1;
+      var r = ovAR / A;
+      if (r >= 1) { bsy = r; } else { bsx = 1 / r; }
+    }
+    var sc = ov.scale || 1;               // <1 zooms in, >1 shrinks / tiles more
+    gl.uniform2f(ovUni.ovScale, bsx * sc, bsy * sc);
+    gl.uniform2f(ovUni.ovOffset, ov.offX || 0, ov.offY || 0);
+    if (ov.chroma) {
+      gl.uniform1i(ovUni.chromaOn, 1);
+      gl.uniform3f(ovUni.chroma, ov.chroma[0], ov.chroma[1], ov.chroma[2]);
+      gl.uniform1f(ovUni.chromaThresh, ov.chromaThresh != null ? ov.chromaThresh : 0.15);
+    } else {
+      gl.uniform1i(ovUni.chromaOn, 0);
+    }
     setOverlayBlend(ov.mode | 0);
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
   }
@@ -1471,6 +1529,23 @@ function makeEye(groupName) {
   return b;
 }
 
+/* Touch double-tap detector: fires cb on two quick taps at roughly the same
+ * spot. dblclick is unreliable on touch, and range inputs swallow it. */
+function addDoubleTapReset(el, cb) {
+  var lastT = 0, lastX = 0, lastY = 0;
+  el.addEventListener('pointerup', function (e) {
+    if (e.pointerType === 'mouse') return; // mouse uses native dblclick
+    var t = e.timeStamp;
+    if (t - lastT < 330 && Math.abs(e.clientX - lastX) < 40 &&
+        Math.abs(e.clientY - lastY) < 40) {
+      cb();
+      lastT = 0;
+    } else {
+      lastT = t; lastX = e.clientX; lastY = e.clientY;
+    }
+  });
+}
+
 function buildSliders() {
   var container = document.getElementById('slidergroups');
   SLIDER_GROUPS.forEach(function (grp) {
@@ -1495,26 +1570,33 @@ function buildSliders() {
       val.className = 'val';
       head.appendChild(lbl);
       head.appendChild(val);
+      head.title = 'Double-click / double-tap to reset';
+      head.style.cursor = 'pointer';
       var input = document.createElement('input');
       input.type = 'range';
       input.min = item.min;
       input.max = item.max;
       input.step = item.step;
       input.value = item.def;
-      input.title = 'Double-click to reset';
+      input.title = 'Double-click / double-tap to reset';
       var fmt = item.fmt || function (v) { return v.toFixed(2); };
       function refresh() { val.textContent = fmt(state.params[item.id]); }
+      function doReset() {
+        input.value = item.def;
+        state.params[item.id] = item.def;
+        refresh();
+        requestRender();
+      }
       input.addEventListener('input', function () {
         state.params[item.id] = parseFloat(input.value);
         refresh();
         requestRender();
       });
-      input.addEventListener('dblclick', function () {
-        input.value = item.def;
-        state.params[item.id] = item.def;
-        refresh();
-        requestRender();
-      });
+      // Reset via double-click on the slider or its label, and double-tap on touch.
+      input.addEventListener('dblclick', doReset);
+      head.addEventListener('dblclick', doReset);
+      addDoubleTapReset(input, doReset);
+      addDoubleTapReset(head, doReset);
       refresh();
       row.appendChild(head);
       row.appendChild(input);
@@ -2280,28 +2362,56 @@ function uploadOverlayTexture(source) {
   return tex;
 }
 
+function isSVGFile(file) {
+  return file.type === 'image/svg+xml' || /\.svg$/i.test(file.name || '');
+}
+
+/* SVG has no reliable createImageBitmap path across browsers, so rasterize it
+ * through an <img> at a capped resolution and hand back a canvas. */
+function rasterizeSVG(file) {
+  return new Promise(function (resolve, reject) {
+    var url = URL.createObjectURL(file);
+    var img = new Image();
+    img.onload = function () {
+      var iw = img.naturalWidth || img.width || 512;
+      var ih = img.naturalHeight || img.height || 512;
+      var maxDim = 1024, s = Math.min(1, maxDim / Math.max(iw, ih));
+      var c = document.createElement('canvas');
+      c.width = Math.max(1, Math.round(iw * s));
+      c.height = Math.max(1, Math.round(ih * s));
+      c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+      URL.revokeObjectURL(url);
+      resolve(c);
+    };
+    img.onerror = function () { URL.revokeObjectURL(url); reject(new Error('SVG could not be rendered')); };
+    img.src = url;
+  });
+}
+
 async function addOverlay(file) {
   if (!gl) { toast('WebGL2 not available.'); return; }
-  var bmp;
+  var src;
   try {
-    bmp = await createImageBitmap(file);
+    src = isSVGFile(file) ? await rasterizeSVG(file) : await createImageBitmap(file);
   } catch (e) {
     toast('Could not load overlay: ' + excerpt(e.message || e));
     return;
   }
-  var tex = uploadOverlayTexture(bmp);
+  var w = src.width, h = src.height;
+  var tex = uploadOverlayTexture(src);
   // small thumbnail for the list
-  var ts = 40, r = Math.min(ts / bmp.width, ts / bmp.height, 1);
+  var ts = 40, r = Math.min(ts / w, ts / h, 1);
   var tc = document.createElement('canvas');
-  tc.width = Math.max(1, Math.round(bmp.width * r));
-  tc.height = Math.max(1, Math.round(bmp.height * r));
-  tc.getContext('2d').drawImage(bmp, 0, 0, tc.width, tc.height);
+  tc.width = Math.max(1, Math.round(w * r));
+  tc.height = Math.max(1, Math.round(h * r));
+  tc.getContext('2d').drawImage(src, 0, 0, tc.width, tc.height);
   var thumb = tc.toDataURL('image/png');
-  var w = bmp.width, h = bmp.height;
-  if (bmp.close) bmp.close();
+  if (src.close) src.close();
   state.overlays.push({
     name: file.name, tex: tex, w: w, h: h,
-    mode: 2, opacity: 0.7, tile: false, scale: 1, thumb: thumb // Screen @ 70% default
+    mode: 2, opacity: 0.7, tile: false, scale: 1,   // Screen @ 70% default
+    offX: 0, offY: 0, keepAspect: false, chroma: null, chromaThresh: 0.15,
+    thumb: thumb
   });
   renderOverlayList();
   requestRender();
@@ -2314,6 +2424,40 @@ function removeOverlay(idx) {
   state.overlays.splice(idx, 1);
   renderOverlayList();
   requestRender();
+}
+
+function hexToRgb(hex) {
+  var m = /^#?([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(hex || '');
+  if (!m) return [0, 1, 0];
+  return [parseInt(m[1], 16) / 255, parseInt(m[2], 16) / 255, parseInt(m[3], 16) / 255];
+}
+function rgbToHex(rgb) {
+  function h(x) {
+    var s = Math.max(0, Math.min(255, Math.round(x * 255))).toString(16);
+    return s.length < 2 ? '0' + s : s;
+  }
+  return '#' + h(rgb[0]) + h(rgb[1]) + h(rgb[2]);
+}
+
+/* One labelled slider row with double-click / double-tap reset to its start value. */
+function mkOverlaySlider(label, min, max, step, value, fmt, oninput) {
+  var row = document.createElement('div');
+  row.className = 'slider-row';
+  row.innerHTML = '<div class="slider-head"><span></span><span class="val"></span></div>';
+  row.querySelector('.slider-head span').textContent = label;
+  var vspan = row.querySelector('.val');
+  var inp = document.createElement('input');
+  inp.type = 'range'; inp.min = min; inp.max = max; inp.step = step; inp.value = value;
+  inp.title = 'Double-click / double-tap to reset';
+  function upd() { vspan.textContent = fmt(parseFloat(inp.value)); }
+  upd();
+  inp.addEventListener('input', function () { oninput(parseFloat(inp.value)); upd(); requestRender(); });
+  var def = value;
+  function reset() { inp.value = def; oninput(def); upd(); requestRender(); }
+  inp.addEventListener('dblclick', reset);
+  addDoubleTapReset(inp, reset);
+  row.appendChild(inp);
+  return row;
 }
 
 function renderOverlayList() {
@@ -2348,45 +2492,78 @@ function renderOverlayList() {
       sel.appendChild(o);
     });
     sel.addEventListener('change', function () { ov.mode = parseInt(sel.value, 10); requestRender(); });
+
+    var aspLbl = document.createElement('label');
+    aspLbl.className = 'overlay-tile';
+    var aspChk = document.createElement('input');
+    aspChk.type = 'checkbox'; aspChk.checked = !!ov.keepAspect;
+    aspChk.addEventListener('change', function () { ov.keepAspect = aspChk.checked; requestRender(); });
+    aspLbl.appendChild(aspChk); aspLbl.appendChild(document.createTextNode(' Keep aspect'));
+
     var tileLbl = document.createElement('label');
     tileLbl.className = 'overlay-tile';
     var tileChk = document.createElement('input');
     tileChk.type = 'checkbox'; tileChk.checked = !!ov.tile;
-    tileChk.addEventListener('change', function () {
-      ov.tile = tileChk.checked; sizeRow.style.display = ov.tile ? '' : 'none'; requestRender();
-    });
+    tileChk.addEventListener('change', function () { ov.tile = tileChk.checked; requestRender(); });
     tileLbl.appendChild(tileChk); tileLbl.appendChild(document.createTextNode(' Tile'));
-    ctrls.appendChild(sel); ctrls.appendChild(tileLbl);
 
-    var opRow = document.createElement('div');
-    opRow.className = 'slider-row';
-    opRow.innerHTML = '<div class="slider-head"><span>Opacity</span><span class="val"></span></div>';
-    var opVal = opRow.querySelector('.val');
-    var op = document.createElement('input');
-    op.type = 'range'; op.min = 0; op.max = 100; op.step = 1;
-    op.value = Math.round(ov.opacity * 100);
-    opVal.textContent = op.value + ' %';
-    op.addEventListener('input', function () {
-      ov.opacity = parseInt(op.value, 10) / 100; opVal.textContent = op.value + ' %'; requestRender();
-    });
-    opRow.appendChild(op);
+    ctrls.appendChild(sel); ctrls.appendChild(aspLbl); ctrls.appendChild(tileLbl);
 
-    var sizeRow = document.createElement('div');
-    sizeRow.className = 'slider-row';
-    sizeRow.style.display = ov.tile ? '' : 'none';
-    sizeRow.innerHTML = '<div class="slider-head"><span>Tile size</span><span class="val"></span></div>';
-    var szVal = sizeRow.querySelector('.val');
-    var sz = document.createElement('input');
-    sz.type = 'range'; sz.min = 1; sz.max = 12; sz.step = 0.5;
-    sz.value = ov.scale || 1;
-    szVal.textContent = (ov.scale || 1) + '×';
-    sz.addEventListener('input', function () {
-      ov.scale = parseFloat(sz.value); szVal.textContent = ov.scale + '×'; requestRender();
+    var opRow = mkOverlaySlider('Opacity', 0, 100, 1, Math.round(ov.opacity * 100),
+      function (v) { return Math.round(v) + ' %'; },
+      function (v) { ov.opacity = v / 100; });
+
+    var scaleRow = mkOverlaySlider('Scale / zoom', 0.1, 12, 0.05, ov.scale || 1,
+      function (v) { return v.toFixed(2) + '×'; },
+      function (v) { ov.scale = v; });
+
+    var offXRow = mkOverlaySlider('Offset X', -1, 1, 0.01, ov.offX || 0,
+      function (v) { return v.toFixed(2); },
+      function (v) { ov.offX = v; });
+
+    var offYRow = mkOverlaySlider('Offset Y', -1, 1, 0.01, ov.offY || 0,
+      function (v) { return v.toFixed(2); },
+      function (v) { ov.offY = v; });
+
+    // Optional alpha (chroma) color: key a colour out to transparent.
+    var chromaHead = document.createElement('div');
+    chromaHead.className = 'overlay-ctrls';
+    var chromaLbl = document.createElement('label');
+    chromaLbl.className = 'overlay-tile';
+    var chromaChk = document.createElement('input');
+    chromaChk.type = 'checkbox'; chromaChk.checked = !!ov.chroma;
+    var chromaColor = document.createElement('input');
+    chromaColor.type = 'color';
+    chromaColor.className = 'overlay-color';
+    chromaColor.value = ov.chroma ? rgbToHex(ov.chroma) : '#00ff00';
+    chromaLbl.appendChild(chromaChk); chromaLbl.appendChild(document.createTextNode(' Alpha color'));
+    chromaHead.appendChild(chromaLbl); chromaHead.appendChild(chromaColor);
+
+    var threshRow = mkOverlaySlider('Alpha range', 0, 1, 0.01,
+      ov.chromaThresh != null ? ov.chromaThresh : 0.15,
+      function (v) { return v.toFixed(2); },
+      function (v) { ov.chromaThresh = v; });
+    threshRow.style.display = ov.chroma ? '' : 'none';
+
+    function applyChroma() {
+      if (chromaChk.checked) {
+        ov.chroma = hexToRgb(chromaColor.value);
+        threshRow.style.display = '';
+      } else {
+        ov.chroma = null;
+        threshRow.style.display = 'none';
+      }
+      requestRender();
+    }
+    chromaChk.addEventListener('change', applyChroma);
+    chromaColor.addEventListener('input', function () {
+      if (chromaChk.checked) { ov.chroma = hexToRgb(chromaColor.value); requestRender(); }
     });
-    sizeRow.appendChild(sz);
 
     item.appendChild(top); item.appendChild(ctrls);
-    item.appendChild(opRow); item.appendChild(sizeRow);
+    item.appendChild(opRow); item.appendChild(scaleRow);
+    item.appendChild(offXRow); item.appendChild(offYRow);
+    item.appendChild(chromaHead); item.appendChild(threshRow);
     overlayList.appendChild(item);
   });
 }
@@ -2424,6 +2601,30 @@ window.addEventListener('drop', function (e) {
   }
 });
 
+/* Dropping an image onto the Overlays panel adds it as an overlay instead of
+ * replacing the base photo. Takes precedence over the window drop above. */
+(function () {
+  var op = document.getElementById('overlaypanel');
+  if (!op) return;
+  function stop(e) { e.preventDefault(); e.stopPropagation(); }
+  ['dragenter', 'dragover'].forEach(function (ev) {
+    op.addEventListener(ev, function (e) { stop(e); op.classList.add('ovdrag'); });
+  });
+  op.addEventListener('dragleave', function (e) {
+    if (!op.contains(e.relatedTarget)) op.classList.remove('ovdrag');
+  });
+  op.addEventListener('drop', function (e) {
+    stop(e);
+    op.classList.remove('ovdrag');
+    document.body.classList.remove('dragover');
+    var f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+    if (!f) return;
+    if (!state.tex) { toast('Load a photo first, then drop overlays onto this panel.'); return; }
+    if (isSVGFile(f) || /^image\//.test(f.type)) addOverlay(f);
+    else toast('Overlays must be an image or SVG.');
+  });
+})();
+
 /* ============================================================
  * Zoom and pan: wheel zooms around the cursor, drag pans,
  * double click resets to fit. Screen render only - histogram
@@ -2447,6 +2648,24 @@ function resetZoom() {
   state.pan = [0, 0];
   requestRender();
 }
+
+/* Mobile photo-pane size toggle: switch between 2/3 and 1/3 of the screen. */
+(function () {
+  var viewer = document.getElementById('viewer');
+  var btn = document.getElementById('btnViewSize');
+  var label = document.getElementById('viewSizeLabel');
+  if (!viewer || !btn) return;
+  var big = true; // start at 2/3
+  function apply() {
+    viewer.classList.toggle('vh-lg', big);
+    viewer.classList.toggle('vh-sm', !big);
+    if (label) label.textContent = big ? '1/3' : '2/3'; // shows the size a tap gives
+    requestRender();
+    if (typeof state !== 'undefined' && state.cropping) updateCropBox();
+  }
+  btn.addEventListener('click', function () { big = !big; apply(); });
+  apply();
+})();
 
 /* Keep the pan within limits so the image cannot be pushed fully
  * off screen: the image edge may reach at most the viewport center. */
@@ -2476,30 +2695,86 @@ canvasWrap.addEventListener('wheel', function (e) {
   requestRender();
 }, { passive: false });
 
-var panDrag = null;
-canvasWrap.addEventListener('pointerdown', function (e) {
-  if (!state.tex || state.cropping || state.zoom <= 1 || e.button !== 0) return;
-  panDrag = { x: e.clientX, y: e.clientY };
-  canvasWrap.setPointerCapture(e.pointerId);
-  canvasWrap.classList.add('panning');
-});
-canvasWrap.addEventListener('pointermove', function (e) {
-  if (!panDrag) return;
-  var rect = canvasWrap.getBoundingClientRect();
-  state.pan[0] += (e.clientX - panDrag.x) / rect.width * 2;
-  state.pan[1] -= (e.clientY - panDrag.y) / rect.height * 2;
-  panDrag.x = e.clientX;
-  panDrag.y = e.clientY;
-  clampPan();
-  requestRender();
-});
-function endPan(e) {
-  if (!panDrag) return;
-  panDrag = null;
-  canvasWrap.classList.remove('panning');
+/* Unified pointer handling: one pointer pans (when zoomed), two pointers
+ * pinch-zoom around their midpoint. Works for mouse and touch. */
+var activePointers = new Map();
+var pinch = null;
+
+function twoPointers() {
+  var it = activePointers.values();
+  return [it.next().value, it.next().value];
 }
-canvasWrap.addEventListener('pointerup', endPan);
-canvasWrap.addEventListener('pointercancel', endPan);
+function startPinch() {
+  var p = twoPointers();
+  var dx = p[0].x - p[1].x, dy = p[0].y - p[1].y;
+  pinch = {
+    dist: Math.hypot(dx, dy) || 1,
+    midX: (p[0].x + p[1].x) / 2,
+    midY: (p[0].y + p[1].y) / 2
+  };
+}
+
+canvasWrap.addEventListener('pointerdown', function (e) {
+  if (!state.tex || state.cropping) return;
+  if (e.pointerType === 'mouse' && e.button !== 0) return;
+  activePointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+  canvasWrap.setPointerCapture(e.pointerId);
+  if (activePointers.size >= 2) {
+    startPinch();
+    canvasWrap.classList.remove('panning');
+  } else if (state.zoom > 1) {
+    canvasWrap.classList.add('panning');
+  }
+});
+
+canvasWrap.addEventListener('pointermove', function (e) {
+  var prev = activePointers.get(e.pointerId);
+  if (!prev) return;
+  var cur = { x: e.clientX, y: e.clientY };
+  activePointers.set(e.pointerId, cur);
+  var rect = canvasWrap.getBoundingClientRect();
+
+  if (activePointers.size >= 2 && pinch) {
+    var p = twoPointers();
+    var dx = p[0].x - p[1].x, dy = p[0].y - p[1].y;
+    var dist = Math.hypot(dx, dy) || 1;
+    var midX = (p[0].x + p[1].x) / 2, midY = (p[0].y + p[1].y) / 2;
+    var cx = ((midX - rect.left) / rect.width) * 2 - 1;
+    var cy = 1 - ((midY - rect.top) / rect.height) * 2;
+    var newZoom = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, state.zoom * (dist / pinch.dist)));
+    var applied = newZoom / state.zoom;
+    // Zoom around the pinch midpoint
+    state.pan[0] = cx - (cx - state.pan[0]) * applied;
+    state.pan[1] = cy - (cy - state.pan[1]) * applied;
+    state.zoom = newZoom;
+    // Two-finger drag also pans
+    state.pan[0] += (midX - pinch.midX) / rect.width * 2;
+    state.pan[1] -= (midY - pinch.midY) / rect.height * 2;
+    pinch.dist = dist; pinch.midX = midX; pinch.midY = midY;
+    if (state.zoom <= ZOOM_MIN) state.pan = [0, 0];
+    clampPan();
+    updateZoomChip();
+    requestRender();
+    return;
+  }
+
+  if (activePointers.size === 1 && state.zoom > 1) {
+    state.pan[0] += (cur.x - prev.x) / rect.width * 2;
+    state.pan[1] -= (cur.y - prev.y) / rect.height * 2;
+    clampPan();
+    requestRender();
+  }
+});
+
+function releasePointer(e) {
+  if (!activePointers.has(e.pointerId)) return;
+  activePointers.delete(e.pointerId);
+  if (activePointers.size < 2) pinch = null;
+  if (activePointers.size === 1 && state.zoom > 1) canvasWrap.classList.add('panning');
+  else canvasWrap.classList.remove('panning');
+}
+canvasWrap.addEventListener('pointerup', releasePointer);
+canvasWrap.addEventListener('pointercancel', releasePointer);
 canvasWrap.addEventListener('dblclick', function () {
   if (state.tex && !state.cropping) resetZoom();
 });

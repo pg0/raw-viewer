@@ -225,7 +225,8 @@
   .overlay-item.selected { border-color: #3a72ad; box-shadow: 0 0 0 1px #3a72ad; }
   .overlay-item.dragging { opacity: .5; }
   .overlay-item.drop-target { border-top: 2px solid #4a90d9; }
-  .overlay-top { cursor: pointer; }
+  .overlay-top { cursor: grab; }
+  .overlay-top:active { cursor: grabbing; }
   .overlay-drag { cursor: grab; color: #777; font-size: 14px; padding: 0 4px; flex: 0 0 auto; user-select: none; }
   .overlay-drag:active { cursor: grabbing; }
   .ov-applyfx { display: flex; align-items: center; gap: 6px; font-size: 11px; color: #b0b0b0; margin-bottom: 8px; cursor: pointer; user-select: none; }
@@ -2973,9 +2974,10 @@ function renderOverlayList() {
     handle.className = 'overlay-drag';
     handle.textContent = '⠿'; // braille dots = drag grip
     handle.title = 'Drag to reorder (top of list = bottom layer)';
-    // The whole row is the reorder handle (grabbing near the thumbnail must not
-    // start a native image copy-drag), so disable the thumbnail's default drag.
-    item.draggable = true;
+    // Only the title row (grip + thumbnail + name) starts a reorder drag, so
+    // grabbing a slider below never triggers it. The thumbnail's own default
+    // drag is disabled so it can't start a native image copy-drag instead.
+    top.draggable = true;
     var img = document.createElement('img');
     img.className = 'overlay-thumb';
     img.draggable = false;
@@ -2998,14 +3000,15 @@ function renderOverlayList() {
     }
     top.appendChild(handle); top.appendChild(img); top.appendChild(name); top.appendChild(rm);
 
-    // Drag-and-drop layer reorder (grab anywhere on the row).
-    item.addEventListener('dragstart', function (e) {
+    // Drag-and-drop layer reorder: the drag starts only on the title row
+    // (top), but the whole item is a drop target so it's easy to land on.
+    top.addEventListener('dragstart', function (e) {
       e.dataTransfer.setData('text/plain', String(idx));
       e.dataTransfer.setData('application/x-overlay-reorder', String(idx));
       e.dataTransfer.effectAllowed = 'move';
       item.classList.add('dragging');
     });
-    item.addEventListener('dragend', function () {
+    top.addEventListener('dragend', function () {
       item.classList.remove('dragging');
       Array.prototype.forEach.call(overlayList.children, function (c) { c.classList.remove('drop-target'); });
     });

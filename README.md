@@ -9,8 +9,10 @@ Live demo: <https://pg0.github.io/raw-viewer/>
 - RAW decode (LibRaw + dcraw), plus JPEG / PNG / WebP / BMP / GIF / HEIC
 - Real-time WebGL2 adjustments: exposure, contrast, highlights/shadows, white balance, saturation, vibrance, film grain (filmgrainer-style, image-anchored)
 - Two `.cube` LUT slots (converter + style) with per-slot intensity
-- Crop with aspect presets (Free / Mobile 9:16 / 4:5 / 1:1 / 16:9), rotate (90&deg; CW/CCW icons + degree field), zoom/pan
+- Image overlays: stack multiple images (grain, film strip, light leaks, dust) blended over the photo (Normal / Screen / Multiply / Add, opacity, optional tiling); they track crop/rotation and are baked into the export
+- Free-angle rotation (type any degree, or 90&deg; CW/CCW icons), crop with aspect presets (Free / Mobile 9:16 / 4:5 / 1:1 / 16:9), zoom/pan
 - Histogram, per-group show/hide (A/B compare), JPEG export at full resolution
+- Always-visible top bar (Open / Save) and a mobile-friendly layout: photo pinned on top, controls scroll below
 
 ## Two ways to run
 

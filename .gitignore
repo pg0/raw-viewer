@@ -1,0 +1,17 @@
+node_modules/
+dist/
+build/
+.env
+.env.*
+.env.local
+.claude/settings.local.json
+CLAUDE.local.md
+*.ARW
+*.arw
+*.CR2
+*.CR3
+*.NEF
+*.jpg
+*.jpeg
+*.png
+serve.log

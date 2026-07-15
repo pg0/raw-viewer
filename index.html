@@ -1,0 +1,2150 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RAW Viewer</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  [hidden] { display: none !important; }
+  html, body { height: 100%; }
+  body {
+    font-family: -apple-system, "Segoe UI", system-ui, Roboto, Helvetica, Arial, sans-serif;
+    font-size: 13px;
+    background: #161616;
+    color: #d4d4d4;
+    overflow: hidden;
+  }
+  #app { display: flex; height: 100vh; }
+
+  /* Viewer area */
+  #viewer {
+    flex: 1;
+    position: relative;
+    background: #1e1e1e;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+  }
+  #canvaswrap { flex: 1; position: relative; overflow: hidden; }
+  #glcanvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+  #thumb {
+    position: absolute; inset: 0;
+    width: 100%; height: 100%;
+    object-fit: contain;
+    display: none;
+    background: #1e1e1e;
+  }
+  #dropzone {
+    position: absolute; inset: 24px;
+    border: 2px dashed #444;
+    border-radius: 12px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 14px;
+    color: #888;
+    transition: border-color .15s, background .15s;
+  }
+  #dropzone.hidden { display: none; }
+  #dropzone.dragover, body.dragover #dropzone { border-color: #4a90d9; background: rgba(74,144,217,.06); color: #bbb; }
+  #dropzone h2 { font-size: 17px; font-weight: 500; color: #aaa; }
+  #dropzone p { font-size: 12px; }
+
+  #overlay {
+    position: absolute; inset: 0;
+    display: none;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    background: rgba(20,20,20,.45);
+    z-index: 5;
+  }
+  #overlay.visible { display: flex; }
+  .spinner {
+    width: 36px; height: 36px;
+    border: 3px solid rgba(255,255,255,.15);
+    border-top-color: #4a90d9;
+    border-radius: 50%;
+    animation: spin .8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  #overlayText { color: #ddd; font-size: 13px; text-shadow: 0 1px 3px rgba(0,0,0,.8); }
+
+  #canvaswrap { cursor: default; }
+  #canvaswrap.zoomed { cursor: grab; }
+  #canvaswrap.panning { cursor: grabbing; }
+  #zoomchip {
+    position: absolute;
+    top: 10px; left: 10px;
+    background: rgba(20,20,20,.75);
+    color: #cfcfcf;
+    border: 1px solid #3a3a3a;
+    border-radius: 4px;
+    padding: 3px 8px;
+    font-size: 11px;
+    z-index: 6;
+    pointer-events: none;
+    font-variant-numeric: tabular-nums;
+  }
+
+  #cropoverlay {
+    position: absolute; inset: 0;
+    z-index: 7;
+    overflow: hidden;
+  }
+  #cropbox {
+    position: absolute;
+    border: 1px solid rgba(255,255,255,.9);
+    box-shadow: 0 0 0 9999px rgba(0,0,0,.55);
+    box-sizing: border-box;
+    cursor: move;
+  }
+  .crop-third {
+    position: absolute;
+    background: rgba(255,255,255,.28);
+    pointer-events: none;
+  }
+  .crop-third-v { top: 0; bottom: 0; width: 1px; }
+  .crop-third-h { left: 0; right: 0; height: 1px; }
+  .crop-handle {
+    position: absolute;
+    width: 12px; height: 12px;
+    background: #fff;
+    border: 1px solid #333;
+    border-radius: 2px;
+    box-sizing: border-box;
+  }
+  .crop-handle[data-h="nw"] { left: -6px; top: -6px; cursor: nwse-resize; }
+  .crop-handle[data-h="n"]  { left: 50%; margin-left: -6px; top: -6px; cursor: ns-resize; }
+  .crop-handle[data-h="ne"] { right: -6px; top: -6px; cursor: nesw-resize; }
+  .crop-handle[data-h="e"]  { right: -6px; top: 50%; margin-top: -6px; cursor: ew-resize; }
+  .crop-handle[data-h="se"] { right: -6px; bottom: -6px; cursor: nwse-resize; }
+  .crop-handle[data-h="s"]  { left: 50%; margin-left: -6px; bottom: -6px; cursor: ns-resize; }
+  .crop-handle[data-h="sw"] { left: -6px; bottom: -6px; cursor: nesw-resize; }
+  .crop-handle[data-h="w"]  { left: -6px; top: 50%; margin-top: -6px; cursor: ew-resize; }
+  button.active { background: #2d5f95; border-color: #3a72ad; color: #fff; }
+
+  #glerror {
+    position: absolute; top: 0; left: 0; right: 0;
+    background: #7a1f1f; color: #fff;
+    padding: 10px 16px;
+    z-index: 20;
+    font-size: 13px;
+  }
+
+  #footer {
+    padding: 6px 12px;
+    font-size: 11px;
+    color: #666;
+    border-top: 1px solid #2a2a2a;
+    background: #1a1a1a;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  /* Sidebar */
+  #sidebar {
+    width: 300px;
+    flex: 0 0 300px;
+    background: #232323;
+    border-left: 1px solid #2e2e2e;
+    overflow-y: auto;
+    padding: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+  #sidebar::-webkit-scrollbar { width: 8px; }
+  #sidebar::-webkit-scrollbar-thumb { background: #3a3a3a; border-radius: 4px; }
+
+  .btnrow { display: flex; gap: 6px; flex-wrap: wrap; }
+  button {
+    background: #333;
+    color: #ddd;
+    border: 1px solid #444;
+    border-radius: 5px;
+    padding: 6px 10px;
+    font-size: 12px;
+    cursor: pointer;
+    font-family: inherit;
+  }
+  button:hover:not(:disabled) { background: #3d3d3d; border-color: #555; }
+  button:active:not(:disabled) { background: #2b2b2b; }
+  button:disabled { opacity: .45; cursor: default; }
+  button.primary { background: #2d5f95; border-color: #3a72ad; color: #fff; }
+  button.primary:hover:not(:disabled) { background: #356ca8; }
+  #cropbar { display: flex; flex-direction: column; gap: 6px; margin-bottom: 12px; }
+  #cropbar[hidden] { display: none; }
+  .cropratios button { padding: 4px 9px; font-size: 11px; }
+  .cropratios button.active { background: #2d5f95; border-color: #3a72ad; color: #fff; }
+  .eyebtn {
+    background: none; border: none; padding: 0; margin: 0;
+    color: #9a9a9a; cursor: pointer; line-height: 0;
+    display: inline-flex; align-items: center;
+  }
+  .eyebtn:hover:not(:disabled) { background: none; border: none; color: #e6e6e6; }
+  .eyebtn:active:not(:disabled) { background: none; }
+  .eyebtn.off { color: #565656; }
+
+  .togglerow {
+    display: flex; align-items: center; gap: 8px;
+    font-size: 12px; color: #bbb;
+    user-select: none;
+  }
+  .togglerow input { accent-color: #4a90d9; }
+
+  .panel {
+    background: #262626;
+    border: 1px solid #303030;
+    border-radius: 6px;
+    padding: 10px;
+  }
+  .panel h3 {
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: .6px;
+    color: #8a8a8a;
+    margin-bottom: 8px;
+  }
+
+  #histcanvas { width: 100%; height: 80px; display: block; background: #1b1b1b; border-radius: 4px; }
+
+  .slider-row { margin-bottom: 6px; }
+  .slider-head {
+    display: flex;
+    justify-content: space-between;
+    font-size: 12px;
+    color: #b5b5b5;
+    margin-bottom: 1px;
+  }
+  .slider-head .val { color: #7fb3e6; font-variant-numeric: tabular-nums; }
+  input[type=range] {
+    width: 100%;
+    height: 18px;
+    -webkit-appearance: none;
+    appearance: none;
+    background: transparent;
+    cursor: pointer;
+  }
+  input[type=range]::-webkit-slider-runnable-track {
+    height: 4px; border-radius: 2px; background: #3c3c3c;
+  }
+  input[type=range]::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    width: 13px; height: 13px;
+    border-radius: 50%;
+    background: #cfcfcf;
+    border: none;
+    margin-top: -4.5px;
+  }
+  input[type=range]::-webkit-slider-thumb:hover { background: #fff; }
+  input[type=range]::-moz-range-track { height: 4px; border-radius: 2px; background: #3c3c3c; }
+  input[type=range]::-moz-range-thumb {
+    width: 13px; height: 13px; border-radius: 50%;
+    background: #cfcfcf; border: none;
+  }
+
+  details.panel summary {
+    cursor: pointer;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: .6px;
+    color: #8a8a8a;
+    outline: none;
+    user-select: none;
+    list-style: none;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  details.panel summary::-webkit-details-marker { display: none; }
+  details.panel summary::before {
+    content: '';
+    width: 0; height: 0;
+    border-left: 4px solid #6f6f6f;
+    border-top: 3.5px solid transparent;
+    border-bottom: 3.5px solid transparent;
+    transition: transform .12s ease;
+  }
+  details.panel[open] > summary::before { transform: rotate(90deg); }
+  details.panel[open] > summary { margin-bottom: 8px; }
+  details.panel summary:hover { color: #b5b5b5; }
+  #metatable { width: 100%; border-collapse: collapse; margin-top: 8px; font-size: 11.5px; }
+  #metatable td { padding: 2px 4px; vertical-align: top; border-bottom: 1px solid #2e2e2e; }
+  #metatable td:first-child { color: #8a8a8a; white-space: nowrap; padding-right: 8px; }
+  #metatable td:last-child { color: #ccc; word-break: break-word; }
+
+  .exportrow { display: flex; gap: 8px; align-items: center; margin-top: 6px; }
+
+  .lutslot { margin-bottom: 10px; }
+  .lutslot:last-of-type { margin-bottom: 0; }
+  .lutslot-title { font-size: 11.5px; color: #b5b5b5; margin-bottom: 5px; }
+  .luthint { font-size: 10.5px; color: #6f6f6f; margin-top: 8px; line-height: 1.4; }
+  .lutinfo {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-top: 8px;
+    background: #2c2c2c;
+    border: 1px solid #3a3a3a;
+    border-radius: 4px;
+    padding: 4px 6px;
+  }
+  .lutinfo span {
+    flex: 1;
+    min-width: 0;
+    font-size: 11.5px;
+    color: #9fc7ec;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .lutinfo button {
+    padding: 0 7px;
+    line-height: 18px;
+    font-size: 12px;
+    border-radius: 3px;
+  }
+
+  #toast {
+    position: fixed;
+    left: 50%; bottom: 28px;
+    transform: translateX(-50%);
+    background: #8c2626;
+    color: #fff;
+    padding: 10px 18px;
+    border-radius: 6px;
+    font-size: 13px;
+    max-width: 70vw;
+    box-shadow: 0 4px 16px rgba(0,0,0,.5);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity .25s;
+    z-index: 50;
+  }
+  #toast.visible { opacity: 1; }
+</style>
+</head>
+<body>
+<div id="app">
+  <main id="viewer">
+    <div id="canvaswrap">
+      <canvas id="glcanvas"></canvas>
+      <img id="thumb" alt="Preview">
+      <div id="dropzone">
+        <h2>Drop a RAW file here</h2>
+        <p>or</p>
+        <button id="btnOpen2" class="primary">Choose file</button>
+        <p>RAW (ARW, CR2, NEF, DNG, RAF ...), JPEG, PNG, WebP, HEIC - or a .cube LUT</p>
+      </div>
+      <div id="zoomchip" hidden></div>
+      <div id="cropoverlay" hidden>
+        <div id="cropbox">
+          <div class="crop-third crop-third-v" style="left:33.33%"></div>
+          <div class="crop-third crop-third-v" style="left:66.66%"></div>
+          <div class="crop-third crop-third-h" style="top:33.33%"></div>
+          <div class="crop-third crop-third-h" style="top:66.66%"></div>
+          <div class="crop-handle" data-h="nw"></div>
+          <div class="crop-handle" data-h="n"></div>
+          <div class="crop-handle" data-h="ne"></div>
+          <div class="crop-handle" data-h="e"></div>
+          <div class="crop-handle" data-h="se"></div>
+          <div class="crop-handle" data-h="s"></div>
+          <div class="crop-handle" data-h="sw"></div>
+          <div class="crop-handle" data-h="w"></div>
+        </div>
+      </div>
+      <div id="overlay">
+        <div class="spinner"></div>
+        <div id="overlayText">Decoding RAW...</div>
+      </div>
+      <div id="glerror" hidden>WebGL2 is not available in this browser - the viewer cannot render.</div>
+    </div>
+    <div id="footer">
+      Wheel: zoom &#183; Drag: pan &#183; Double-click: fit &#183; Supported formats (dcraw 9.26): ARW, CR2, NEF, DNG, RAF, ORF, RW2, PEF, SRW, SRF, SR2, KDC, DCR, MRW, 3FR, ERF, MEF, MOS, X3F. Very new formats such as CR3 or newer lossless-compressed ARW are not supported.
+    </div>
+  </main>
+  <aside id="sidebar">
+    <div class="btnrow">
+      <button id="btnOpen" class="primary">Open file</button>
+      <button id="btnRotate" disabled>Rotate 90&#176;</button>
+      <button id="btnCrop" disabled>Crop</button>
+      <button id="btnReset" disabled>Reset all</button>
+    </div>
+    <div id="cropbar" hidden>
+      <div class="btnrow">
+        <button id="btnCropApply" class="primary">Apply</button>
+        <button id="btnCropReset">Full</button>
+        <button id="btnCropCancel">Cancel</button>
+      </div>
+      <div class="btnrow cropratios">
+        <button class="ratio active" data-ar="0" title="Free ratio">Free</button>
+        <button class="ratio" data-ar="0.5625" title="9:16 portrait (phone)">Mobile 9:16</button>
+        <button class="ratio" data-ar="0.8" title="4:5 portrait">4:5</button>
+        <button class="ratio" data-ar="1" title="Square">1:1</button>
+        <button class="ratio" data-ar="1.7778" title="16:9 landscape">16:9</button>
+      </div>
+    </div>
+    <label class="togglerow">
+      <input type="checkbox" id="chkFullRes" disabled>
+      Full resolution (slower)
+    </label>
+    <details class="panel" open>
+      <summary>Histogram</summary>
+      <canvas id="histcanvas" width="256" height="80"></canvas>
+    </details>
+    <div id="slidergroups"></div>
+    <details class="panel" open id="lutpanel">
+      <summary>LUT</summary>
+      <div class="lutslot">
+        <div class="lutslot-title">LUT1</div>
+        <div class="btnrow"><button id="btnLut0">Load .cube</button></div>
+        <div id="lutinfo0" class="lutinfo" hidden>
+          <span id="lutname0"></span>
+          <button id="btnLutRemove0" title="Remove LUT">x</button>
+        </div>
+        <div class="slider-row" style="margin-top:8px">
+          <div class="slider-head"><span>Intensity</span><span class="val" id="lutIntVal0">100 %</span></div>
+          <input type="range" id="lutIntensity0" min="0" max="100" step="1" value="100">
+        </div>
+      </div>
+      <div class="lutslot">
+        <div class="lutslot-title">LUT2</div>
+        <div class="btnrow"><button id="btnLut1">Load .cube</button></div>
+        <div id="lutinfo1" class="lutinfo" hidden>
+          <span id="lutname1"></span>
+          <button id="btnLutRemove1" title="Remove LUT">x</button>
+        </div>
+        <div class="slider-row" style="margin-top:8px">
+          <div class="slider-head"><span>Intensity</span><span class="val" id="lutIntVal1">100 %</span></div>
+          <input type="range" id="lutIntensity1" min="0" max="100" step="1" value="100">
+        </div>
+      </div>
+      <div class="luthint">Drop a .cube onto the window to load it as LUT2.</div>
+    </details>
+    <div class="panel">
+      <h3>Export</h3>
+      <div class="slider-row">
+        <div class="slider-head"><span>Quality</span><span class="val" id="qualVal">95</span></div>
+        <input type="range" id="quality" min="60" max="100" step="1" value="95">
+      </div>
+      <div class="exportrow">
+        <button id="btnExport" class="primary" disabled>Export JPEG</button>
+      </div>
+    </div>
+    <details class="panel" id="metapanel">
+      <summary>Metadata</summary>
+      <table id="metatable"></table>
+    </details>
+  </aside>
+</div>
+<div id="toast"></div>
+<input type="file" id="fileinput" hidden
+  accept=".arw,.cr2,.nef,.dng,.raf,.orf,.rw2,.pef,.srw,.srf,.sr2,.kdc,.dcr,.mrw,.3fr,.erf,.mef,.mos,.x3f,.jpg,.jpeg,.png,.webp,.bmp,.gif,.heic,.heif">
+<input type="file" id="lutinput" hidden accept=".cube">
+
+<script src="dcraw.js"></script>
+<script src="libheif.js"></script>
+<script>
+'use strict';
+
+/* HEIC/HEIF decode via the locally bundled libheif.js (wasm embedded).
+ * Returns { width, height, rgba: Uint8ClampedArray }. */
+async function decodeHEIC(uint8Array) {
+  if (!window.libheif) throw new Error('libheif.js not loaded');
+  var mod = await Promise.resolve(window.libheif());
+  var decoder = new mod.HeifDecoder();
+  var images = decoder.decode(uint8Array);
+  if (!images || images.length === 0) throw new Error('No images found in HEIC data');
+  var image = images[0];
+  var width = image.get_width();
+  var height = image.get_height();
+  var rgba = new Uint8ClampedArray(width * height * 4);
+  var result = await new Promise(function (resolve) {
+    image.display({ data: rgba, width: width, height: height }, function (displayData) {
+      resolve(displayData);
+    });
+  });
+  if (!result) throw new Error('HEIC decode failed');
+  return { width: width, height: height, rgba: rgba };
+}
+
+/* ============================================================
+ * PPM parsing (shared logic, unit-tested via Node against the
+ * same dcraw build - keep markers intact)
+ * ============================================================ */
+// [PPM-PARSER-BEGIN]
+/**
+ * Parse a binary PPM (P6) header. Tolerates comments (#...) and
+ * arbitrary whitespace between tokens. Returns dims, maxval and
+ * the byte offset where the pixel payload starts.
+ */
+function parsePPMHeader(bytes) {
+  var pos = 0;
+  function isSpace(c) {
+    return c === 32 || c === 9 || c === 10 || c === 13 || c === 11 || c === 12;
+  }
+  function token() {
+    for (;;) {
+      while (pos < bytes.length && isSpace(bytes[pos])) pos++;
+      if (bytes[pos] === 35) { // '#' comment until end of line
+        while (pos < bytes.length && bytes[pos] !== 10) pos++;
+      } else {
+        break;
+      }
+    }
+    var start = pos;
+    while (pos < bytes.length && !isSpace(bytes[pos])) pos++;
+    var out = '';
+    for (var i = start; i < pos; i++) out += String.fromCharCode(bytes[i]);
+    return out;
+  }
+  var magic = token();
+  if (magic !== 'P6') throw new Error('Kein P6-PPM (Magic: ' + magic + ')');
+  var width = parseInt(token(), 10);
+  var height = parseInt(token(), 10);
+  var maxval = parseInt(token(), 10);
+  if (!(width > 0) || !(height > 0) || !(maxval > 0)) {
+    throw new Error('Invalid PPM header');
+  }
+  pos++; // exactly one whitespace byte separates maxval from payload
+  return { width: width, height: height, maxval: maxval, dataOffset: pos };
+}
+
+/**
+ * Convert PPM payload into a Float32Array RGBA (A=1), values 0..1.
+ * Big-endian uint16 samples when maxval > 255, else 8-bit.
+ * If the image exceeds maxDim on either axis it is downscaled by
+ * integer-stride nearest sampling during conversion.
+ */
+function ppmToFloatRGBA(bytes, info, maxDim) {
+  var width = info.width, height = info.height, maxval = info.maxval;
+  var bps = maxval > 255 ? 2 : 1; // bytes per sample
+  var step = 1, outW = width, outH = height;
+  if (maxDim && Math.max(width, height) > maxDim) {
+    step = Math.ceil(Math.max(width, height) / maxDim);
+    outW = Math.floor(width / step);
+    outH = Math.floor(height / step);
+  }
+  var needed = info.dataOffset + width * height * 3 * bps;
+  if (bytes.length < needed) throw new Error('PPM data incomplete');
+  var out = new Float32Array(outW * outH * 4);
+  var inv = 1 / maxval;
+  var o = 0;
+  for (var y = 0; y < outH; y++) {
+    var rowBase = info.dataOffset + (y * step) * width * 3 * bps;
+    for (var x = 0; x < outW; x++) {
+      var i = rowBase + (x * step) * 3 * bps;
+      if (bps === 2) {
+        out[o++] = ((bytes[i] << 8) | bytes[i + 1]) * inv;
+        out[o++] = ((bytes[i + 2] << 8) | bytes[i + 3]) * inv;
+        out[o++] = ((bytes[i + 4] << 8) | bytes[i + 5]) * inv;
+      } else {
+        out[o++] = bytes[i] * inv;
+        out[o++] = bytes[i + 1] * inv;
+        out[o++] = bytes[i + 2] * inv;
+      }
+      out[o++] = 1;
+    }
+  }
+  return { data: out, width: outW, height: outH };
+}
+// [PPM-PARSER-END]
+
+/* ============================================================
+ * .cube LUT parsing (Adobe/Resolve format, unit-tested via Node)
+ * ============================================================ */
+// [CUBE-PARSER-BEGIN]
+/**
+ * Parse an Adobe/Resolve .cube LUT file. Supports LUT_3D_SIZE and
+ * LUT_1D_SIZE, TITLE, DOMAIN_MIN/DOMAIN_MAX and # comments. Data is
+ * normalized by the domain, clamped to [0,1] and quantized to RGBA8
+ * bytes ready for texture upload. 3D ordering: red varies fastest,
+ * then green, then blue (matches GL texture x/y/z axes).
+ */
+function parseCubeLUT(text) {
+  var lines = text.split(/\r?\n/);
+  var size = 0;
+  var is3D = null;
+  var domainMin = [0, 0, 0];
+  var domainMax = [1, 1, 1];
+  var data = [];
+  for (var li = 0; li < lines.length; li++) {
+    var line = lines[li].trim();
+    if (!line || line.charAt(0) === '#') continue;
+    var up = line.toUpperCase();
+    if (up.indexOf('TITLE') === 0) continue;
+    var parts = line.split(/\s+/);
+    if (up.indexOf('DOMAIN_MIN') === 0) {
+      domainMin = [parseFloat(parts[1]), parseFloat(parts[2]), parseFloat(parts[3])];
+      continue;
+    }
+    if (up.indexOf('DOMAIN_MAX') === 0) {
+      domainMax = [parseFloat(parts[1]), parseFloat(parts[2]), parseFloat(parts[3])];
+      continue;
+    }
+    if (up.indexOf('LUT_3D_SIZE') === 0) {
+      size = parseInt(parts[1], 10);
+      is3D = true;
+      continue;
+    }
+    if (up.indexOf('LUT_1D_SIZE') === 0) {
+      size = parseInt(parts[1], 10);
+      is3D = false;
+      continue;
+    }
+    if (up.indexOf('LUT_') === 0) continue; // other LUT_* keywords, ignore
+    if (parts.length < 3) throw new Error('Invalid line ' + (li + 1) + ': ' + line);
+    var r = parseFloat(parts[0]);
+    var g = parseFloat(parts[1]);
+    var b = parseFloat(parts[2]);
+    if (isNaN(r) || isNaN(g) || isNaN(b)) {
+      throw new Error('Invalid data line ' + (li + 1) + ': ' + line);
+    }
+    data.push(r, g, b);
+  }
+  if (is3D === null || !(size > 1)) {
+    throw new Error('No valid LUT_3D_SIZE or LUT_1D_SIZE found');
+  }
+  var entries = is3D ? size * size * size : size;
+  if (data.length !== entries * 3) {
+    throw new Error('Expected ' + entries + ' LUT entries, found ' + (data.length / 3));
+  }
+  var out = new Uint8Array(entries * 4);
+  for (var i = 0; i < entries; i++) {
+    for (var c = 0; c < 3; c++) {
+      var v = data[i * 3 + c];
+      var span = domainMax[c] - domainMin[c];
+      if (span !== 0) v = (v - domainMin[c]) / span;
+      v = Math.min(1, Math.max(0, v));
+      out[i * 4 + c] = Math.round(v * 255);
+    }
+    out[i * 4 + 3] = 255;
+  }
+  return { size: size, is3D: is3D, data: out };
+}
+// [CUBE-PARSER-END]
+
+/* ============================================================
+ * Globals and state
+ * ============================================================ */
+var canvas = document.getElementById('glcanvas');
+var histCanvas = document.getElementById('histcanvas');
+var thumbImg = document.getElementById('thumb');
+var dropzone = document.getElementById('dropzone');
+var overlay = document.getElementById('overlay');
+var overlayText = document.getElementById('overlayText');
+var toastEl = document.getElementById('toast');
+
+var state = {
+  rawBytes: null,      // original file bytes, kept for re-decode
+  baseName: 'export',
+  tex: null,
+  texW: 0,
+  texH: 0,
+  rot: 0,              // 0..3, quarter turns clockwise
+  zoom: 1,             // 1 = fit, >1 zoomed in
+  pan: [0, 0],         // clip-space offset, applied after zoom
+  crop: { x: 0, y: 0, w: 1, h: 1 }, // displayed-normalized crop window
+  cropping: false,     // true while the crop tool is active
+  cropAspect: 0,       // locked crop ratio (pixel W:H); 0 = free
+  thumbBytes: null,    // embedded JPEG bytes, kept as fallback for undecodable RAWs
+  busy: false,         // a load is in progress (blocks concurrent loads)
+  fullRes: false,
+  decoding: false,
+  params: {},
+  luts: [null, null],       // slot 0 = converter, slot 1 = style; each { name, size, is3D, tex }
+  lutIntensity: [1, 1]
+};
+
+var LUT_UNITS = null; // filled in initGL: per-slot texture unit numbers + dummy textures
+
+var SLIDER_GROUPS = [
+  { group: 'Light', items: [
+    { id: 'exposure',   label: 'Exposure',   min: -5, max: 5, step: 0.01, def: 0,
+      fmt: function (v) { return (v > 0 ? '+' : '') + v.toFixed(2) + ' EV'; } },
+    { id: 'contrast',   label: 'Contrast',   min: -1, max: 1, step: 0.01, def: 0 },
+    { id: 'highlights', label: 'Highlights', min: -1, max: 1, step: 0.01, def: 0 },
+    { id: 'shadows',    label: 'Shadows',    min: -1, max: 1, step: 0.01, def: 0 },
+    { id: 'whites',     label: 'Whites',     min: -1, max: 1, step: 0.01, def: 0 },
+    { id: 'blacks',     label: 'Blacks',     min: -1, max: 1, step: 0.01, def: 0 }
+  ]},
+  { group: 'Color', items: [
+    { id: 'temperature', label: 'Temperature', min: -1, max: 1, step: 0.01, def: 0 },
+    { id: 'tint',        label: 'Tint',        min: -1, max: 1, step: 0.01, def: 0 },
+    { id: 'vibrance',    label: 'Vibrance',    min: -1, max: 1, step: 0.01, def: 0 },
+    { id: 'saturation',  label: 'Saturation',  min: -1, max: 1, step: 0.01, def: 0 }
+  ]},
+  { group: 'Effects', items: [
+    { id: 'gamma',    label: 'Gamma',    min: 0.3, max: 2.5, step: 0.01, def: 1 },
+    { id: 'vignette', label: 'Vignette', min: -1,  max: 1,   step: 0.01, def: 0 },
+    { id: 'grain',     label: 'Grain',      min: 0,   max: 1,   step: 0.01, def: 0 },
+    { id: 'grainSize', label: 'Grain size', min: 1,   max: 8,   step: 0.1,  def: 2.5,
+      fmt: function (v) { return v.toFixed(1) + ' px'; } }
+  ]}
+];
+
+/* ============================================================
+ * WebGL2 setup
+ * ============================================================ */
+var gl = canvas.getContext('webgl2', { antialias: false, preserveDrawingBuffer: false });
+if (!gl) {
+  document.getElementById('glerror').hidden = false;
+}
+
+var VERT_SRC = [
+  '#version 300 es',
+  'layout(location = 0) in vec2 a_pos;',
+  'uniform float u_rot;',
+  'uniform vec2 u_scale;',
+  'uniform float u_zoom;',
+  'uniform vec2 u_pan;',
+  'uniform vec2 u_cropOrigin;',  // texture-space crop window
+  'uniform vec2 u_cropSize;',
+  'out vec2 v_uv;',    // texture sampling coords (crop window)
+  'out vec2 v_local;', // 0..1 across the visible quad (for vignette)
+  'void main() {',
+  '  v_local = vec2(a_pos.x * 0.5 + 0.5, 0.5 - a_pos.y * 0.5);',
+  '  v_uv = u_cropOrigin + v_local * u_cropSize;',
+  '  float c = cos(u_rot);',
+  '  float s = sin(u_rot);',
+  '  vec2 p = mat2(c, s, -s, c) * a_pos;',
+  '  gl_Position = vec4(p * u_scale * u_zoom + u_pan, 0.0, 1.0);',
+  '}'
+].join('\n');
+
+var FRAG_SRC = [
+  '#version 300 es',
+  'precision highp float;',
+  'in vec2 v_uv;',
+  'in vec2 v_local;',
+  'out vec4 fragColor;',
+  'uniform sampler2D u_image;',
+  'uniform float u_exposure, u_contrast, u_highlights, u_shadows, u_whites, u_blacks;',
+  'uniform float u_temperature, u_tint, u_vibrance, u_saturation, u_gamma, u_vignette;',
+  'uniform float u_grain, u_grainSize;',
+  // Two LUT slots: 0 = converter, 1 = style. Each can be 3D or 1D.
+  'uniform mediump sampler3D u_lut0_3d;',
+  'uniform sampler2D u_lut0_1d;',
+  'uniform int u_lut0Mode;',   // 0 = off, 1 = 3D, 2 = 1D
+  'uniform float u_lut0Size;',
+  'uniform float u_lut0Int;',
+  'uniform mediump sampler3D u_lut1_3d;',
+  'uniform sampler2D u_lut1_1d;',
+  'uniform int u_lut1Mode;',
+  'uniform float u_lut1Size;',
+  'uniform float u_lut1Int;',
+  'const vec3 LUMA = vec3(0.2126, 0.7152, 0.0722);',
+  '',
+  'float hash(vec2 p) {',
+  '  return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453);',
+  '}',
+  '',
+  // Standard-normal sample for one grain cell (Box-Muller on two decorrelated hashes)
+  'float gaussCell(vec2 c) {',
+  '  float u1 = max(hash(c), 1e-6);',
+  '  float u2 = hash(c + vec2(37.17, 11.31));',
+  '  float g = sqrt(-2.0 * log(u1)) * cos(6.2831853 * u2);',
+  '  return clamp(g, -2.5, 2.5);',
+  '}',
+  // Smooth (bilinear + smoothstep) gaussian value noise so grain has a real size',
+  'float grainNoise(vec2 gc) {',
+  '  vec2 ip = floor(gc);',
+  '  vec2 fp = fract(gc);',
+  '  fp = fp * fp * (3.0 - 2.0 * fp);',
+  '  float n00 = gaussCell(ip);',
+  '  float n10 = gaussCell(ip + vec2(1.0, 0.0));',
+  '  float n01 = gaussCell(ip + vec2(0.0, 1.0));',
+  '  float n11 = gaussCell(ip + vec2(1.0, 1.0));',
+  '  return mix(mix(n00, n10, fp.x), mix(n01, n11, fp.x), fp.y);',
+  '}',
+  // filmgrainer development curve: power peaks in the upper mids, tapers toward',
+  // shadows (0.15) and highlights (0.25)',
+  'float grainPower(float lm) {',
+  '  if (lm < 0.63) return mix(0.15, 0.5, lm / 0.63);',
+  '  if (lm < 0.78) return 0.5;',
+  '  return mix(0.5, 0.25, (lm - 0.78) / 0.22);',
+  '}',
+  '',
+  // Apply one LUT slot. Display-referred sRGB input, half-texel corrected.
+  'vec3 applyLut(vec3 rgb, int mode, mediump sampler3D l3, sampler2D l1, float sz, float inten) {',
+  '  if (mode == 0) return rgb;',
+  '  vec3 cc = clamp(rgb, 0.0, 1.0);',
+  '  float lscale = (sz - 1.0) / sz;',
+  '  float loffset = 0.5 / sz;',
+  '  vec3 lc;',
+  '  if (mode == 1) {',
+  '    lc = texture(l3, cc * lscale + loffset).rgb;',
+  '  } else {',
+  '    lc.r = texture(l1, vec2(cc.r * lscale + loffset, 0.5)).r;',
+  '    lc.g = texture(l1, vec2(cc.g * lscale + loffset, 0.5)).g;',
+  '    lc.b = texture(l1, vec2(cc.b * lscale + loffset, 0.5)).b;',
+  '  }',
+  '  return mix(rgb, lc, inten);',
+  '}',
+  '',
+  'vec3 linToSrgb(vec3 c) {',
+  '  c = max(c, vec3(0.0));',
+  '  vec3 lo = c * 12.92;',
+  '  vec3 hi = 1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055;',
+  '  return mix(lo, hi, step(vec3(0.0031308), c));',
+  '}',
+  '',
+  'void main() {',
+  '  vec3 rgb = texture(u_image, v_uv).rgb;',
+  '',
+  '  // 1. White balance trim in linear light',
+  '  rgb.r *= exp2(u_temperature * 0.6);',
+  '  rgb.b *= exp2(-u_temperature * 0.6);',
+  '  rgb.g *= exp2(-u_tint * 0.4);',
+  '',
+  '  // 2. Exposure',
+  '  rgb *= exp2(u_exposure);',
+  '',
+  '  // 3. Tone regions, luminance masked, applied as luma ratio to avoid hue shifts',
+  '  float luma = dot(rgb, LUMA);',
+  '  float lg = pow(clamp(luma, 0.0, 1.0), 1.0 / 2.2);',
+  '  float hiMask = smoothstep(0.4, 0.95, lg);',
+  '  float shMask = 1.0 - smoothstep(0.1, 0.6, lg);',
+  '  float whMask = smoothstep(0.65, 1.0, lg);',
+  '  float blMask = 1.0 - smoothstep(0.0, 0.35, lg);',
+  '  float f = exp2(u_highlights * hiMask + u_shadows * shMask + u_whites * 0.7 * whMask);',
+  '  float newLuma = luma * f;',
+  '  if (u_blacks >= 0.0) {',
+  '    newLuma += u_blacks * 0.08 * blMask * blMask;',
+  '  } else {',
+  '    newLuma *= exp2(u_blacks * 1.5 * blMask);',
+  '  }',
+  '  rgb *= newLuma / max(luma, 1e-6);',
+  '',
+  '  // 4. Linear to sRGB (exact piecewise curve)',
+  '  rgb = linToSrgb(rgb);',
+  '',
+  '  // 5. Contrast: S-curve around 0.5 in gamma space',
+  '  vec3 sc = smoothstep(vec3(0.0), vec3(1.0), rgb);',
+  '  rgb = mix(rgb, sc, u_contrast);',
+  '',
+  '  // 6. Saturation, then vibrance (boosts low-sat pixels more)',
+  '  float lum = dot(rgb, LUMA);',
+  '  rgb = mix(vec3(lum), rgb, 1.0 + u_saturation);',
+  '  lum = dot(rgb, LUMA);',
+  '  float mx = max(max(rgb.r, rgb.g), rgb.b);',
+  '  float mn = min(min(rgb.r, rgb.g), rgb.b);',
+  '  float vibW = 1.0 - smoothstep(0.1, 0.7, mx - mn);',
+  '  rgb = mix(vec3(lum), rgb, 1.0 + u_vibrance * 1.2 * vibW);',
+  '',
+  '  // 7. Fine-tune gamma in gamma space',
+  '  rgb = pow(max(rgb, vec3(0.0)), vec3(1.0 / u_gamma));',
+  '',
+  '  // 7b. LUT slots in order: converter first, then style',
+  '  rgb = applyLut(rgb, u_lut0Mode, u_lut0_3d, u_lut0_1d, u_lut0Size, u_lut0Int);',
+  '  rgb = applyLut(rgb, u_lut1Mode, u_lut1_3d, u_lut1_1d, u_lut1Size, u_lut1Int);',
+  '',
+  '  // 8. Vignette: radial falloff from center of the visible frame',
+  '  float d = length(v_local - 0.5) * 2.0;',
+  '  float fall = smoothstep(0.4, 1.5, d);',
+  '  rgb *= exp2(u_vignette * 1.5 * fall);',
+  '',
+  '  // 8b. Film grain: gaussian, image-anchored (zooms and pans with the photo),',
+  '  //      size- and luminance-shaped per the filmgrainer development curve.',
+  '  //      Signal-COUPLED (multiplicative) so grain lives inside the image',
+  '  //      rather than sitting on top as a flat layer, plus a small additive',
+  '  //      floor so shadows still carry grain the way real film does.',
+  '  if (u_grain > 0.0) {',
+  '    vec2 gpix = v_uv * vec2(textureSize(u_image, 0));',
+  '    float g = grainNoise(gpix / max(u_grainSize, 0.5));',
+  '    float lm = dot(rgb, LUMA);',
+  '    float amt = u_grain * grainPower(lm);',
+  '    rgb *= 1.0 + g * amt * 0.55;',
+  '    rgb += g * amt * 0.05;',
+  '  }',
+  '',
+  '  // 9. Final clamp',
+  '  fragColor = vec4(clamp(rgb, 0.0, 1.0), 1.0);',
+  '}'
+].join('\n');
+
+var prog = null;
+var uni = {};
+var PARAM_IDS = ['exposure', 'contrast', 'highlights', 'shadows', 'whites', 'blacks',
+                 'temperature', 'tint', 'vibrance', 'saturation', 'gamma', 'vignette', 'grain', 'grainSize'];
+
+function compileShader(type, src) {
+  var sh = gl.createShader(type);
+  gl.shaderSource(sh, src);
+  gl.compileShader(sh);
+  if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) {
+    throw new Error('Shader: ' + gl.getShaderInfoLog(sh));
+  }
+  return sh;
+}
+
+function initGL() {
+  var vs = compileShader(gl.VERTEX_SHADER, VERT_SRC);
+  var fs = compileShader(gl.FRAGMENT_SHADER, FRAG_SRC);
+  prog = gl.createProgram();
+  gl.attachShader(prog, vs);
+  gl.attachShader(prog, fs);
+  gl.linkProgram(prog);
+  if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
+    throw new Error('Program: ' + gl.getProgramInfoLog(prog));
+  }
+  gl.useProgram(prog);
+  uni.rot = gl.getUniformLocation(prog, 'u_rot');
+  uni.scale = gl.getUniformLocation(prog, 'u_scale');
+  uni.zoom = gl.getUniformLocation(prog, 'u_zoom');
+  uni.pan = gl.getUniformLocation(prog, 'u_pan');
+  uni.cropOrigin = gl.getUniformLocation(prog, 'u_cropOrigin');
+  uni.cropSize = gl.getUniformLocation(prog, 'u_cropSize');
+  uni.image = gl.getUniformLocation(prog, 'u_image');
+  uni.lut = [
+    {
+      s3d: gl.getUniformLocation(prog, 'u_lut0_3d'),
+      s1d: gl.getUniformLocation(prog, 'u_lut0_1d'),
+      mode: gl.getUniformLocation(prog, 'u_lut0Mode'),
+      size: gl.getUniformLocation(prog, 'u_lut0Size'),
+      inten: gl.getUniformLocation(prog, 'u_lut0Int')
+    },
+    {
+      s3d: gl.getUniformLocation(prog, 'u_lut1_3d'),
+      s1d: gl.getUniformLocation(prog, 'u_lut1_1d'),
+      mode: gl.getUniformLocation(prog, 'u_lut1Mode'),
+      size: gl.getUniformLocation(prog, 'u_lut1Size'),
+      inten: gl.getUniformLocation(prog, 'u_lut1Int')
+    }
+  ];
+  for (var i = 0; i < PARAM_IDS.length; i++) {
+    uni[PARAM_IDS[i]] = gl.getUniformLocation(prog, 'u_' + PARAM_IDS[i]);
+  }
+  gl.uniform1i(uni.image, 0);
+  // Texture units: 0 image, 1/2 = slot0 3d/1d, 3/4 = slot1 3d/1d
+  gl.uniform1i(uni.lut[0].s3d, 1);
+  gl.uniform1i(uni.lut[0].s1d, 2);
+  gl.uniform1i(uni.lut[1].s3d, 3);
+  gl.uniform1i(uni.lut[1].s1d, 4);
+
+  // Dummy LUT textures so the samplers are always valid, even when off.
+  // LUT_UNITS[slot] = { u3d, u1d, dummy3d, dummy1d }
+  var dummyPx = new Uint8Array([0, 0, 0, 255]);
+  LUT_UNITS = [];
+  for (var slot = 0; slot < 2; slot++) {
+    var u3d = 1 + slot * 2, u1d = 2 + slot * 2;
+    var d3 = gl.createTexture();
+    gl.activeTexture(gl.TEXTURE0 + u3d);
+    gl.bindTexture(gl.TEXTURE_3D, d3);
+    gl.texImage3D(gl.TEXTURE_3D, 0, gl.RGBA8, 1, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, dummyPx);
+    gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    var d1 = gl.createTexture();
+    gl.activeTexture(gl.TEXTURE0 + u1d);
+    gl.bindTexture(gl.TEXTURE_2D, d1);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, dummyPx);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    LUT_UNITS.push({ u3d: u3d, u1d: u1d, dummy3d: d3, dummy1d: d1 });
+  }
+  gl.activeTexture(gl.TEXTURE0);
+
+  // Fullscreen quad
+  var vao = gl.createVertexArray();
+  gl.bindVertexArray(vao);
+  var vbo = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
+  gl.bufferData(gl.ARRAY_BUFFER,
+    new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
+  gl.enableVertexAttribArray(0);
+  gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+}
+if (gl) initGL();
+
+function uploadTexture(img) {
+  if (state.tex) gl.deleteTexture(state.tex);
+  state.tex = gl.createTexture();
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D, state.tex);
+  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA16F, img.width, img.height, 0,
+    gl.RGBA, gl.FLOAT, img.data);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  state.texW = img.width;
+  state.texH = img.height;
+}
+
+/**
+ * Draw the image quad with the current adjustment uniforms.
+ * flipY = -1 for framebuffer passes (readPixels row order).
+ * letterbox = fit into viewport aspect; otherwise fill it.
+ */
+/* Convert a displayed-normalized crop rect into texture-space UV window,
+ * inverting the 90-degree display rotation (rotation is applied to the
+ * quad geometry, so the sampled sub-window must be rotated the other way). */
+function dispCropToTex(crop, rot) {
+  var x = crop.x, y = crop.y, w = crop.w, h = crop.h;
+  if (rot === 1) return { x: y, y: 1 - (x + w), w: h, h: w };
+  if (rot === 2) return { x: 1 - (x + w), y: 1 - (y + h), w: w, h: h };
+  if (rot === 3) return { x: 1 - (y + h), y: x, w: h, h: w };
+  return { x: x, y: y, w: w, h: h };
+}
+
+function drawQuad(vpW, vpH, rot, flipY, letterbox, zoom, pan, crop) {
+  crop = crop || { x: 0, y: 0, w: 1, h: 1 };
+  gl.useProgram(prog);
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D, state.tex);
+  for (var i = 0; i < PARAM_IDS.length; i++) {
+    var pid = PARAM_IDS[i];
+    // A bypassed group (eye toggled off) renders its params at their defaults.
+    var grp = PARAM_GROUP[pid];
+    var pv = (grp && !groupEnabled[grp]) ? PARAM_DEF[pid] : state.params[pid];
+    gl.uniform1f(uni[pid], pv);
+  }
+  var lutOn = groupEnabled.LUT;
+  for (var s = 0; s < 2; s++) {
+    var lut = state.luts[s];
+    gl.uniform1i(uni.lut[s].mode, (lutOn && lut) ? (lut.is3D ? 1 : 2) : 0);
+    gl.uniform1f(uni.lut[s].size, lut ? lut.size : 1);
+    gl.uniform1f(uni.lut[s].inten, state.lutIntensity[s]);
+  }
+  gl.uniform1f(uni.rot, -rot * Math.PI / 2); // negative = clockwise on screen
+  var tc = dispCropToTex(crop, rot);
+  gl.uniform2f(uni.cropOrigin, tc.x, tc.y);
+  gl.uniform2f(uni.cropSize, tc.w, tc.h);
+  var sx = 1, sy = 1;
+  if (letterbox) {
+    var rotated = rot % 2 === 1;
+    var fullW = rotated ? state.texH : state.texW;
+    var fullH = rotated ? state.texW : state.texH;
+    var iw = fullW * crop.w;
+    var ih = fullH * crop.h;
+    var imgAspect = iw / ih;
+    var vpAspect = vpW / vpH;
+    if (imgAspect > vpAspect) sy = vpAspect / imgAspect;
+    else sx = imgAspect / vpAspect;
+  }
+  gl.uniform2f(uni.scale, sx, sy * flipY);
+  gl.uniform1f(uni.zoom, zoom || 1);
+  gl.uniform2f(uni.pan, pan ? pan[0] : 0, pan ? pan[1] : 0);
+  gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+}
+
+function resizeCanvas() {
+  var dpr = window.devicePixelRatio || 1;
+  var w = Math.max(1, Math.round(canvas.clientWidth * dpr));
+  var h = Math.max(1, Math.round(canvas.clientHeight * dpr));
+  if (canvas.width !== w || canvas.height !== h) {
+    canvas.width = w;
+    canvas.height = h;
+  }
+}
+
+var FULL_CROP = { x: 0, y: 0, w: 1, h: 1 };
+
+/* Render on demand - no rAF loop */
+var renderQueued = false;
+function requestRender() {
+  if (renderQueued) return;
+  renderQueued = true;
+  requestAnimationFrame(function () {
+    renderQueued = false;
+    render();
+  });
+}
+
+function render() {
+  if (!gl || !state.tex) return;
+  resizeCanvas();
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  gl.viewport(0, 0, canvas.width, canvas.height);
+  gl.clearColor(0.118, 0.118, 0.118, 1);
+  gl.clear(gl.COLOR_BUFFER_BIT);
+  // While the crop tool is active, show the whole image at fit (the crop
+  // rectangle is an HTML overlay); otherwise render the committed crop.
+  var activeCrop = state.cropping ? FULL_CROP : state.crop;
+  var z = state.cropping ? 1 : state.zoom;
+  var p = state.cropping ? [0, 0] : state.pan;
+  drawQuad(canvas.width, canvas.height, state.rot, 1, true, z, p, activeCrop);
+  updateZoomChip();
+  updateCropBox();
+  scheduleHistogram();
+}
+
+/* ============================================================
+ * Histogram: small offscreen render + readback, throttled ~10Hz
+ * ============================================================ */
+var histFB = null;
+var HIST_W = 256, HIST_H = 160;
+
+function ensureHistFB() {
+  if (histFB) return;
+  var tex = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, tex);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, HIST_W, HIST_H, 0,
+    gl.RGBA, gl.UNSIGNED_BYTE, null);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+  var fbo = gl.createFramebuffer();
+  gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0,
+    gl.TEXTURE_2D, tex, 0);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  histFB = { fbo: fbo, tex: tex, px: new Uint8Array(HIST_W * HIST_H * 4) };
+}
+
+var histTimer = 0;
+function scheduleHistogram() {
+  if (histTimer) return;
+  histTimer = setTimeout(function () {
+    histTimer = 0;
+    updateHistogram();
+  }, 100);
+}
+
+function updateHistogram() {
+  if (!gl || !state.tex) return;
+  ensureHistFB();
+  gl.bindFramebuffer(gl.FRAMEBUFFER, histFB.fbo);
+  gl.viewport(0, 0, HIST_W, HIST_H);
+  var hCrop = state.cropping ? FULL_CROP : state.crop;
+  drawQuad(HIST_W, HIST_H, 0, -1, false, 1, [0, 0], hCrop);
+  gl.readPixels(0, 0, HIST_W, HIST_H, gl.RGBA, gl.UNSIGNED_BYTE, histFB.px);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+
+  var bins = [new Uint32Array(256), new Uint32Array(256), new Uint32Array(256)];
+  var px = histFB.px;
+  for (var i = 0; i < px.length; i += 4) {
+    bins[0][px[i]]++;
+    bins[1][px[i + 1]]++;
+    bins[2][px[i + 2]]++;
+  }
+  var ctx = histCanvas.getContext('2d');
+  var W = histCanvas.width, H = histCanvas.height;
+  ctx.clearRect(0, 0, W, H);
+  ctx.fillStyle = '#1b1b1b';
+  ctx.fillRect(0, 0, W, H);
+  var maxBin = 1;
+  for (var c = 0; c < 3; c++) {
+    for (var b = 0; b < 256; b++) {
+      if (bins[c][b] > maxBin) maxBin = bins[c][b];
+    }
+  }
+  var colors = ['rgba(235,80,80,.85)', 'rgba(90,220,110,.85)', 'rgba(90,140,245,.85)'];
+  ctx.globalCompositeOperation = 'lighter';
+  var invSqrtMax = 1 / Math.sqrt(maxBin);
+  for (c = 0; c < 3; c++) {
+    ctx.beginPath();
+    ctx.moveTo(0, H);
+    for (b = 0; b < 256; b++) {
+      var v = Math.sqrt(bins[c][b]) * invSqrtMax; // sqrt scale for readability
+      ctx.lineTo(b * W / 255, H - v * (H - 2));
+    }
+    ctx.lineTo(W, H);
+    ctx.closePath();
+    ctx.fillStyle = colors[c];
+    ctx.fill();
+  }
+  ctx.globalCompositeOperation = 'source-over';
+}
+
+/* ============================================================
+ * UI helpers
+ * ============================================================ */
+var toastTimer = 0;
+function toast(msg) {
+  toastEl.textContent = msg;
+  toastEl.classList.add('visible');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(function () {
+    toastEl.classList.remove('visible');
+  }, 6000);
+}
+
+function showOverlay(text) {
+  overlayText.textContent = text;
+  overlay.classList.add('visible');
+}
+function hideOverlay() {
+  overlay.classList.remove('visible');
+}
+
+function nextFrame() {
+  return new Promise(function (resolve) {
+    var done = false;
+    function go() { if (!done) { done = true; resolve(); } }
+    requestAnimationFrame(function () { setTimeout(go, 0); });
+    // rAF is paused while the tab is hidden; fall back on a timer so a load
+    // started (or continued) in a background tab never stalls forever.
+    setTimeout(go, 60);
+  });
+}
+
+function readFileBytes(file) {
+  return new Promise(function (resolve, reject) {
+    var fr = new FileReader();
+    fr.onload = function () { resolve(new Uint8Array(fr.result)); };
+    fr.onerror = function () { reject(fr.error || new Error('Lesefehler')); };
+    fr.readAsArrayBuffer(file);
+  });
+}
+
+function setControlsEnabled(on) {
+  document.getElementById('btnRotate').disabled = !on;
+  document.getElementById('btnCrop').disabled = !on;
+  document.getElementById('btnReset').disabled = !on;
+  document.getElementById('btnExport').disabled = !on;
+  document.getElementById('chkFullRes').disabled = !on;
+}
+
+/* Slider construction */
+var sliderInputs = {};
+// Per-group bypass (eye toggle). A disabled group renders its params at default.
+var groupEnabled = { Light: true, Color: true, Effects: true, LUT: true };
+var PARAM_GROUP = {}, PARAM_DEF = {};
+SLIDER_GROUPS.forEach(function (g) {
+  g.items.forEach(function (it) { PARAM_GROUP[it.id] = g.group; PARAM_DEF[it.id] = it.def; });
+});
+
+var EYE_ON = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>';
+var EYE_OFF = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20C5 20 1 12 1 12a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19"/><path d="M14.12 14.12a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>';
+
+// Build an eye toggle button that shows/hides a group's effect (A/B compare).
+function makeEye(groupName) {
+  var b = document.createElement('button');
+  b.type = 'button';
+  b.className = 'eyebtn';
+  function sync() {
+    var on = groupEnabled[groupName];
+    b.innerHTML = on ? EYE_ON : EYE_OFF;
+    b.classList.toggle('off', !on);
+    b.title = (on ? 'Hide ' : 'Show ') + groupName + ' effect';
+  }
+  b.addEventListener('click', function (e) {
+    e.preventDefault();   // do not toggle the <details> open state
+    e.stopPropagation();
+    groupEnabled[groupName] = !groupEnabled[groupName];
+    sync();
+    requestRender();
+  });
+  sync();
+  return b;
+}
+
+function buildSliders() {
+  var container = document.getElementById('slidergroups');
+  SLIDER_GROUPS.forEach(function (grp) {
+    var panel = document.createElement('details');
+    panel.className = 'panel';
+    panel.open = true;
+    var h = document.createElement('summary');
+    h.appendChild(makeEye(grp.group));
+    var stxt = document.createElement('span');
+    stxt.textContent = grp.group;
+    h.appendChild(stxt);
+    panel.appendChild(h);
+    grp.items.forEach(function (item) {
+      state.params[item.id] = item.def;
+      var row = document.createElement('div');
+      row.className = 'slider-row';
+      var head = document.createElement('div');
+      head.className = 'slider-head';
+      var lbl = document.createElement('span');
+      lbl.textContent = item.label;
+      var val = document.createElement('span');
+      val.className = 'val';
+      head.appendChild(lbl);
+      head.appendChild(val);
+      var input = document.createElement('input');
+      input.type = 'range';
+      input.min = item.min;
+      input.max = item.max;
+      input.step = item.step;
+      input.value = item.def;
+      input.title = 'Double-click to reset';
+      var fmt = item.fmt || function (v) { return v.toFixed(2); };
+      function refresh() { val.textContent = fmt(state.params[item.id]); }
+      input.addEventListener('input', function () {
+        state.params[item.id] = parseFloat(input.value);
+        refresh();
+        requestRender();
+      });
+      input.addEventListener('dblclick', function () {
+        input.value = item.def;
+        state.params[item.id] = item.def;
+        refresh();
+        requestRender();
+      });
+      refresh();
+      row.appendChild(head);
+      row.appendChild(input);
+      panel.appendChild(row);
+      sliderInputs[item.id] = { input: input, def: item.def, refresh: refresh };
+    });
+    container.appendChild(panel);
+  });
+}
+buildSliders();
+
+// LUT panel is static HTML; give its header the same eye toggle.
+(function () {
+  var sum = document.querySelector('#lutpanel > summary');
+  if (sum) {
+    var txt = document.createElement('span');
+    txt.textContent = sum.textContent.trim();
+    sum.textContent = '';
+    sum.appendChild(makeEye('LUT'));
+    sum.appendChild(txt);
+  }
+})();
+
+function resetAllSliders() {
+  Object.keys(sliderInputs).forEach(function (id) {
+    var s = sliderInputs[id];
+    s.input.value = s.def;
+    state.params[id] = s.def;
+    s.refresh();
+  });
+  requestRender();
+}
+
+/* Metadata panel */
+function renderMetadata(metaText, file) {
+  var table = document.getElementById('metatable');
+  table.innerHTML = '';
+  function addRow(k, v) {
+    var tr = document.createElement('tr');
+    var td1 = document.createElement('td');
+    var td2 = document.createElement('td');
+    td1.textContent = k;
+    td2.textContent = v;
+    tr.appendChild(td1);
+    tr.appendChild(td2);
+    table.appendChild(tr);
+  }
+  addRow('File', file.name);
+  addRow('Size', (file.size / (1024 * 1024)).toFixed(1) + ' MB');
+  if (metaText) {
+    metaText.split('\n').forEach(function (line) {
+      line = line.trim();
+      if (!line) return;
+      var idx = line.indexOf(':');
+      if (idx > 0) addRow(line.slice(0, idx).trim(), line.slice(idx + 1).trim());
+      else addRow('', line);
+    });
+  }
+  document.getElementById('metapanel').open = true;
+}
+
+/* ============================================================
+ * dcraw pipeline
+ * ============================================================ */
+function excerpt(s) {
+  s = String(s).trim();
+  return s.length > 160 ? s.slice(0, 160) + '...' : s;
+}
+
+async function decodeRaw(fullRes) {
+  if (!state.rawBytes || state.decoding) return false;
+  state.decoding = true;
+  showOverlay(fullRes
+    ? 'Decoding RAW at full resolution (takes a few seconds)...'
+    : 'Decoding RAW...');
+  // Two frames so the overlay + spinner are painted before the block
+  await nextFrame();
+  await nextFrame();
+  var ok = false;
+  try {
+    var out;
+    try {
+      // Note: no setInterpolationQuality here - this dcraw.js build crashes on
+      // value-carrying flags ("const args" reassignment bug in the wrapper).
+      // dcraw 9.26 defaults to AHD (q=3) for non-Fuji sensors anyway.
+      out = dcraw(state.rawBytes, fullRes
+        ? { use16BitLinearMode: true, useCameraWhiteBalance: true }
+        : { use16BitLinearMode: true, useCameraWhiteBalance: true, setHalfSizeMode: true });
+    } catch (e) {
+      // Large full-res outputs (24MP+, ~145MB PPM) blow up the MEMFS storage
+      // of this asm.js build (abort / RangeError). If half size already worked,
+      // report the size limitation in plain terms.
+      if (fullRes && state.tex) {
+        toast('Full resolution failed - the file is too large for the ' +
+          'embedded dcraw decoder. Half resolution stays active.');
+      } else {
+        toast('Decoding failed: ' + excerpt(e && e.message ? e.message : e));
+      }
+      return false;
+    }
+    if (!(out instanceof Uint8Array) || out.length === 0) {
+      // Suppress the hard error when loadFile has an embedded-JPEG fallback ready.
+      if (!state.thumbBytes) {
+        toast('File is not supported or is corrupt.' +
+          (typeof out === 'string' && out.trim() ? ' (' + excerpt(out) + ')' : ''));
+      }
+      return false;
+    }
+    var header, img;
+    try {
+      header = parsePPMHeader(out);
+      var maxTex = gl ? gl.getParameter(gl.MAX_TEXTURE_SIZE) : 4096;
+      img = ppmToFloatRGBA(out, header, maxTex);
+    } catch (e2) {
+      toast('Could not read PPM output: ' + excerpt(e2.message || e2));
+      return false;
+    }
+    out = null; // drop PPM buffer reference
+    if (!gl) return false;
+    uploadTexture(img);
+    img.data = null; // drop float copy after GPU upload
+    img = null;
+    ok = true;
+    thumbImg.style.display = 'none';
+    if (thumbImg.src) {
+      URL.revokeObjectURL(thumbImg.src);
+      thumbImg.removeAttribute('src');
+    }
+    setControlsEnabled(true);
+    requestRender();
+  } finally {
+    state.decoding = false;
+    hideOverlay();
+  }
+  return ok;
+}
+
+/* sRGB (8-bit) to linear light lookup, built once */
+var SRGB_TO_LIN = (function () {
+  var t = new Float32Array(256);
+  for (var i = 0; i < 256; i++) {
+    var v = i / 255;
+    t[i] = v <= 0.04045 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4);
+  }
+  return t;
+})();
+
+/* Route a dropped or picked file to the right loader by extension */
+function dispatchFile(file) {
+  // Dropping a .cube always loads it into the Style slot (slot 1).
+  if (/\.cube$/i.test(file.name)) { loadLUTFile(file, 1); return; }
+  if (/\.(jpe?g|png|webp|bmp|gif|heic|heif)$/i.test(file.name)) { loadRasterImage(file); return; }
+  loadFile(file);
+}
+
+/**
+ * Load a normal raster image (JPEG/PNG/WebP). The pipeline expects
+ * linear-light input, so decode to sRGB bytes and convert to linear
+ * before upload. No dcraw, no half/full toggle.
+ */
+async function loadRasterImage(file) {
+  if (state.decoding || state.busy) { toast('Please wait - a decode is still running.'); return; }
+  if (!gl) { toast('WebGL2 not available - cannot render.'); return; }
+  var isHeic = /\.(heic|heif)$/i.test(file.name);
+  dropzone.classList.add('hidden');
+  showOverlay(isHeic ? 'Decoding HEIC...' : 'Loading image...');
+  await nextFrame();
+
+  // Produce a drawable source (ImageBitmap or canvas) plus its true dimensions.
+  var source, srcW, srcH, typeLabel;
+  try {
+    if (isHeic) {
+      var bytes = new Uint8Array(await file.arrayBuffer());
+      var heic = await decodeHEIC(bytes); // { width, height, rgba }
+      var hc = document.createElement('canvas');
+      hc.width = heic.width; hc.height = heic.height;
+      hc.getContext('2d').putImageData(new ImageData(heic.rgba, heic.width, heic.height), 0, 0);
+      source = hc; srcW = heic.width; srcH = heic.height;
+      typeLabel = 'HEIC';
+    } else {
+      var bmp = await createImageBitmap(file);
+      source = bmp; srcW = bmp.width; srcH = bmp.height;
+      typeLabel = file.type || 'Image';
+    }
+  } catch (e) {
+    hideOverlay();
+    toast('Could not load image: ' + excerpt(e.message || e));
+    if (!state.tex) dropzone.classList.remove('hidden');
+    return;
+  }
+
+  try {
+    var maxTex = gl.getParameter(gl.MAX_TEXTURE_SIZE);
+    var scale = 1;
+    if (Math.max(srcW, srcH) > maxTex) scale = maxTex / Math.max(srcW, srcH);
+    var cw = Math.max(1, Math.round(srcW * scale));
+    var ch = Math.max(1, Math.round(srcH * scale));
+    var c = document.createElement('canvas');
+    c.width = cw; c.height = ch;
+    var cx = c.getContext('2d');
+    cx.drawImage(source, 0, 0, cw, ch);
+    if (source.close) source.close();
+    var id = cx.getImageData(0, 0, cw, ch);
+    var srcpx = id.data;
+    var data = new Float32Array(cw * ch * 4);
+    for (var i = 0, o = 0; i < srcpx.length; i += 4) {
+      data[o++] = SRGB_TO_LIN[srcpx[i]];
+      data[o++] = SRGB_TO_LIN[srcpx[i + 1]];
+      data[o++] = SRGB_TO_LIN[srcpx[i + 2]];
+      data[o++] = 1;
+    }
+    state.rawBytes = null; // raster images cannot be re-decoded at full res
+    state.baseName = file.name.replace(/\.[^.]+$/, '') || 'export';
+    state.rot = 0;
+    state.zoom = 1;
+    state.pan = [0, 0];
+    state.crop = { x: 0, y: 0, w: 1, h: 1 };
+    if (state.cropping) exitCropMode(false);
+    uploadTexture({ data: data, width: cw, height: ch });
+    data = null;
+    thumbImg.style.display = 'none';
+    if (thumbImg.src) { URL.revokeObjectURL(thumbImg.src); thumbImg.removeAttribute('src'); }
+    renderMetadata('Type: ' + typeLabel + '\nDimensions: ' + srcW + ' x ' + srcH, file);
+    setControlsEnabled(true);
+    var chk = document.getElementById('chkFullRes');
+    chk.checked = false;
+    chk.disabled = true; // no RAW behind a raster image
+    state.fullRes = false;
+    requestRender();
+  } catch (e2) {
+    toast('Could not process image: ' + excerpt(e2.message || e2));
+    if (!state.tex) dropzone.classList.remove('hidden');
+  } finally {
+    hideOverlay();
+  }
+}
+
+async function loadFile(file) {
+  if (state.decoding || state.busy) {
+    toast('Please wait - a decode is still running.');
+    return;
+  }
+  if (!gl) {
+    toast('WebGL2 not available - cannot render.');
+    return;
+  }
+  state.busy = true;   // block concurrent loads (dcraw asm.js is single-threaded)
+  try {
+  dropzone.classList.add('hidden');
+  showOverlay('Reading file...');
+  var bytes;
+  try {
+    bytes = await readFileBytes(file);
+  } catch (e) {
+    hideOverlay();
+    toast('Could not read file: ' + excerpt(e.message || e));
+    if (!state.tex) dropzone.classList.remove('hidden');
+    return;
+  }
+  state.rawBytes = bytes;
+  state.baseName = file.name.replace(/\.[^.]+$/, '') || 'export';
+  state.rot = 0;
+  state.zoom = 1;
+  state.pan = [0, 0];
+  state.crop = { x: 0, y: 0, w: 1, h: 1 };
+  if (state.cropping) exitCropMode(false);
+  var chk = document.getElementById('chkFullRes');
+  chk.checked = false;
+  state.fullRes = false;
+
+  // a. Identify: parse metadata into the panel
+  showOverlay('Reading metadata...');
+  await nextFrame();
+  var metaText = '';
+  try {
+    var meta = dcraw(state.rawBytes, { verbose: true, identify: true });
+    if (typeof meta === 'string') metaText = meta;
+  } catch (eIdent) {
+    // identify failure is non-fatal, decode step will surface real errors
+  }
+  renderMetadata(metaText, file);
+
+  // b. Embedded thumbnail for an instant preview under the spinner. Kept as the
+  //    fallback image source for cameras dcraw cannot demosaic (see step c2).
+  state.thumbBytes = null;
+  await nextFrame();
+  try {
+    var thumb = dcraw(state.rawBytes, { extractThumbnail: true });
+    if (thumb instanceof Uint8Array && thumb.length > 2 &&
+        thumb[0] === 0xFF && thumb[1] === 0xD8) {
+      state.thumbBytes = thumb;
+      if (thumbImg.src) URL.revokeObjectURL(thumbImg.src);
+      thumbImg.src = URL.createObjectURL(new Blob([thumb], { type: 'image/jpeg' }));
+      thumbImg.style.display = 'block';
+    }
+  } catch (eThumb) {
+    // no thumbnail, not fatal
+  }
+
+  // c. Full linear 16-bit decode (half size). Skip it when dcraw already
+  //    reported no decodable raw data (e.g. Sony ZV-E1) - the decode would
+  //    only churn for seconds before failing, so go straight to the fallback.
+  await nextFrame();
+  var noRawData = /Number of raw images:\s*0\b/.test(metaText);
+  var ok = noRawData ? false : await decodeRaw(false);
+
+  // c2. Fallback for RAWs dcraw 9.26 cannot decode (e.g. Sony ZV-E1): show the
+  //     embedded JPEG so the file is at least viewable, croppable and
+  //     exportable, and say plainly that it is not the full raw.
+  if (!ok && state.thumbBytes) {
+    var dims = await loadEmbeddedThumb(state.thumbBytes);
+    if (dims) {
+      toast('RAW decode not supported for this camera (e.g. Sony ZV-E1). ' +
+        'Showing the embedded JPEG preview - ' + dims.w + ' x ' + dims.h +
+        ', reduced quality, not the full raw.');
+      ok = true;
+    }
+  }
+  state.thumbBytes = null;
+
+  if (!ok && !state.tex) {
+    thumbImg.style.display = 'none';
+    dropzone.classList.remove('hidden');
+  }
+  } finally {
+    state.busy = false;
+  }
+}
+
+/* Load dcraw's embedded JPEG as the working image (fallback for undecodable
+ * RAWs). Returns { w, h } on success, or null. sRGB -> linear on upload so the
+ * linear-light pipeline stays correct; full-res toggle is disabled (no raw). */
+async function loadEmbeddedThumb(thumbBytes) {
+  if (!gl) return null;
+  try {
+    var blob = new Blob([thumbBytes], { type: 'image/jpeg' });
+    var bmp = await createImageBitmap(blob);
+    var maxTex = gl.getParameter(gl.MAX_TEXTURE_SIZE);
+    var W = bmp.width, H = bmp.height, scale = 1;
+    if (Math.max(W, H) > maxTex) scale = maxTex / Math.max(W, H);
+    var cw = Math.max(1, Math.round(W * scale)), ch = Math.max(1, Math.round(H * scale));
+    var c = document.createElement('canvas');
+    c.width = cw; c.height = ch;
+    var cx = c.getContext('2d');
+    cx.drawImage(bmp, 0, 0, cw, ch);
+    bmp.close();
+    var srcpx = cx.getImageData(0, 0, cw, ch).data;
+    var data = new Float32Array(cw * ch * 4);
+    for (var i = 0, o = 0; i < srcpx.length; i += 4) {
+      data[o++] = SRGB_TO_LIN[srcpx[i]];
+      data[o++] = SRGB_TO_LIN[srcpx[i + 1]];
+      data[o++] = SRGB_TO_LIN[srcpx[i + 2]];
+      data[o++] = 1;
+    }
+    state.rawBytes = null; // undecodable raw - do not offer re-decode
+    state.rot = 0; state.zoom = 1; state.pan = [0, 0];
+    state.crop = { x: 0, y: 0, w: 1, h: 1 };
+    if (state.cropping) exitCropMode(false);
+    uploadTexture({ data: data, width: cw, height: ch });
+    data = null;
+    thumbImg.style.display = 'none';
+    if (thumbImg.src) { URL.revokeObjectURL(thumbImg.src); thumbImg.removeAttribute('src'); }
+    setControlsEnabled(true);
+    var chk = document.getElementById('chkFullRes');
+    chk.checked = false; chk.disabled = true; // no raw behind the fallback JPEG
+    state.fullRes = false;
+    requestRender();
+    return { w: cw, h: ch };
+  } catch (e) {
+    return null;
+  }
+}
+
+/* ============================================================
+ * Export JPEG at full texture resolution
+ * ============================================================ */
+function exportJPEG() {
+  if (!gl || !state.tex) return;
+  var rotated = state.rot % 2 === 1;
+  var fullW = rotated ? state.texH : state.texW;
+  var fullH = rotated ? state.texW : state.texH;
+  var w = Math.max(1, Math.round(fullW * state.crop.w));
+  var h = Math.max(1, Math.round(fullH * state.crop.h));
+
+  var tex = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, tex);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+  var fbo = gl.createFramebuffer();
+  gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+  if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) {
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.deleteFramebuffer(fbo);
+    gl.deleteTexture(tex);
+    toast('Could not create export framebuffer.');
+    return;
+  }
+  gl.viewport(0, 0, w, h);
+  drawQuad(w, h, state.rot, -1, false, 1, [0, 0], state.crop); // flipY for readPixels row order
+  var px = new Uint8Array(w * h * 4);
+  gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, px);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  gl.deleteFramebuffer(fbo);
+  gl.deleteTexture(tex);
+
+  var out = document.createElement('canvas');
+  out.width = w;
+  out.height = h;
+  var ctx = out.getContext('2d');
+  var imgData = new ImageData(new Uint8ClampedArray(px.buffer), w, h);
+  ctx.putImageData(imgData, 0, 0);
+  px = null;
+
+  var q = parseInt(document.getElementById('quality').value, 10) / 100;
+  var name = state.baseName + '.jpg';
+  out.toBlob(function (blob) {
+    if (!blob) {
+      toast('JPEG export failed.');
+      return;
+    }
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url;
+    a.download = name;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(function () { URL.revokeObjectURL(url); }, 5000);
+  }, 'image/jpeg', q);
+}
+
+/* ============================================================
+ * LUT handling
+ * ============================================================ */
+function applyLUT(parsed, name, slot) {
+  // Parsing already succeeded, so the old LUT in this slot can go first.
+  // Order matters: removeLUT rebinds the dummy on this unit, which would
+  // otherwise overwrite the freshly bound replacement texture.
+  removeLUT(slot, true);
+  var units = LUT_UNITS[slot];
+  var tex = gl.createTexture();
+  if (parsed.is3D) {
+    gl.activeTexture(gl.TEXTURE0 + units.u3d);
+    gl.bindTexture(gl.TEXTURE_3D, tex);
+    gl.texImage3D(gl.TEXTURE_3D, 0, gl.RGBA8,
+      parsed.size, parsed.size, parsed.size, 0,
+      gl.RGBA, gl.UNSIGNED_BYTE, parsed.data);
+    gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_WRAP_R, gl.CLAMP_TO_EDGE);
+  } else {
+    gl.activeTexture(gl.TEXTURE0 + units.u1d);
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, parsed.size, 1, 0,
+      gl.RGBA, gl.UNSIGNED_BYTE, parsed.data);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  }
+  gl.activeTexture(gl.TEXTURE0);
+  state.luts[slot] = { name: name, size: parsed.size, is3D: parsed.is3D, tex: tex };
+  document.getElementById('lutname' + slot).textContent =
+    name + ' (' + (parsed.is3D ? '3D ' + parsed.size + '³' : '1D ' + parsed.size) + ')';
+  document.getElementById('lutinfo' + slot).hidden = false;
+  requestRender();
+}
+
+function removeLUT(slot, silent) {
+  var lut = state.luts[slot];
+  if (lut) {
+    var units = LUT_UNITS[slot];
+    // Rebind the dummy so the sampler unit stays valid
+    if (lut.is3D) {
+      gl.activeTexture(gl.TEXTURE0 + units.u3d);
+      gl.bindTexture(gl.TEXTURE_3D, units.dummy3d);
+    } else {
+      gl.activeTexture(gl.TEXTURE0 + units.u1d);
+      gl.bindTexture(gl.TEXTURE_2D, units.dummy1d);
+    }
+    gl.activeTexture(gl.TEXTURE0);
+    gl.deleteTexture(lut.tex);
+    state.luts[slot] = null;
+  }
+  if (!silent) {
+    document.getElementById('lutinfo' + slot).hidden = true;
+    requestRender();
+  }
+}
+
+function loadLUTFile(file, slot) {
+  if (!gl) return;
+  var fr = new FileReader();
+  fr.onload = function () {
+    var parsed;
+    try {
+      parsed = parseCubeLUT(fr.result);
+    } catch (e) {
+      toast('Could not load LUT: ' + excerpt(e.message || e));
+      return; // previous LUT state stays untouched
+    }
+    applyLUT(parsed, file.name, slot);
+  };
+  fr.onerror = function () {
+    toast('Could not read LUT file.');
+  };
+  fr.readAsText(file);
+}
+
+/* ============================================================
+ * Event wiring
+ * ============================================================ */
+var fileInput = document.getElementById('fileinput');
+fileInput.addEventListener('change', function () {
+  if (fileInput.files && fileInput.files[0]) dispatchFile(fileInput.files[0]);
+  fileInput.value = '';
+});
+document.getElementById('btnOpen').addEventListener('click', function () { fileInput.click(); });
+document.getElementById('btnOpen2').addEventListener('click', function () { fileInput.click(); });
+
+document.getElementById('btnRotate').addEventListener('click', function () {
+  state.rot = (state.rot + 1) % 4;
+  // Zoom/pan and the displayed-space crop do not survive a rotation
+  // intuitively - reset them to keep the mapping unambiguous.
+  state.zoom = 1;
+  state.pan = [0, 0];
+  state.crop = { x: 0, y: 0, w: 1, h: 1 };
+  requestRender();
+});
+document.getElementById('btnReset').addEventListener('click', resetAllSliders);
+document.getElementById('btnExport').addEventListener('click', exportJPEG);
+
+document.getElementById('chkFullRes').addEventListener('change', async function () {
+  var chk = this;
+  var want = chk.checked;
+  if (want === state.fullRes) return;
+  var ok = await decodeRaw(want);
+  if (ok) {
+    state.fullRes = want;
+  } else {
+    chk.checked = state.fullRes; // revert on failure
+  }
+});
+
+var lutInput = document.getElementById('lutinput');
+var pendingLutSlot = 1;
+lutInput.addEventListener('change', function () {
+  if (lutInput.files && lutInput.files[0]) loadLUTFile(lutInput.files[0], pendingLutSlot);
+  lutInput.value = '';
+});
+[0, 1].forEach(function (slot) {
+  document.getElementById('btnLut' + slot).addEventListener('click', function () {
+    pendingLutSlot = slot;
+    lutInput.click();
+  });
+  document.getElementById('btnLutRemove' + slot).addEventListener('click', function () {
+    removeLUT(slot, false);
+  });
+  var intInput = document.getElementById('lutIntensity' + slot);
+  var intVal = document.getElementById('lutIntVal' + slot);
+  intInput.addEventListener('input', function () {
+    state.lutIntensity[slot] = parseInt(intInput.value, 10) / 100;
+    intVal.textContent = intInput.value + ' %';
+    requestRender();
+  });
+  intInput.addEventListener('dblclick', function () {
+    intInput.value = 100;
+    state.lutIntensity[slot] = 1;
+    intVal.textContent = '100 %';
+    requestRender();
+  });
+});
+
+var qualInput = document.getElementById('quality');
+qualInput.addEventListener('input', function () {
+  document.getElementById('qualVal').textContent = qualInput.value;
+});
+qualInput.addEventListener('dblclick', function () {
+  qualInput.value = 95;
+  document.getElementById('qualVal').textContent = '95';
+});
+
+/* Drag & drop over the whole window */
+['dragenter', 'dragover'].forEach(function (ev) {
+  window.addEventListener(ev, function (e) {
+    e.preventDefault();
+    document.body.classList.add('dragover');
+  });
+});
+window.addEventListener('dragleave', function (e) {
+  if (!e.relatedTarget) document.body.classList.remove('dragover');
+});
+window.addEventListener('drop', function (e) {
+  e.preventDefault();
+  document.body.classList.remove('dragover');
+  if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0]) {
+    dispatchFile(e.dataTransfer.files[0]);
+  }
+});
+
+/* ============================================================
+ * Zoom and pan: wheel zooms around the cursor, drag pans,
+ * double click resets to fit. Screen render only - histogram
+ * and export always use the full image.
+ * ============================================================ */
+var ZOOM_MIN = 1, ZOOM_MAX = 16;
+var canvasWrap = document.getElementById('canvaswrap');
+var zoomChip = document.getElementById('zoomchip');
+
+function updateZoomChip() {
+  var zoomed = state.zoom > 1.001;
+  if (zoomed) {
+    zoomChip.textContent = Math.round(state.zoom * 100) + ' %';
+  }
+  zoomChip.hidden = !zoomed;
+  canvasWrap.classList.toggle('zoomed', zoomed);
+}
+
+function resetZoom() {
+  state.zoom = 1;
+  state.pan = [0, 0];
+  requestRender();
+}
+
+/* Keep the pan within limits so the image cannot be pushed fully
+ * off screen: the image edge may reach at most the viewport center. */
+function clampPan() {
+  var lim = Math.max(0, state.zoom);
+  state.pan[0] = Math.min(lim, Math.max(-lim, state.pan[0]));
+  state.pan[1] = Math.min(lim, Math.max(-lim, state.pan[1]));
+}
+
+canvasWrap.addEventListener('wheel', function (e) {
+  if (!state.tex || state.cropping) return;
+  e.preventDefault();
+  var rect = canvasWrap.getBoundingClientRect();
+  // Cursor in clip space (x right, y up)
+  var cx = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+  var cy = 1 - ((e.clientY - rect.top) / rect.height) * 2;
+  var factor = Math.exp(-e.deltaY * 0.0015);
+  var newZoom = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, state.zoom * factor));
+  if (newZoom === state.zoom) return;
+  var ratio = newZoom / state.zoom;
+  // Keep the point under the cursor fixed while zooming
+  state.pan[0] = cx - (cx - state.pan[0]) * ratio;
+  state.pan[1] = cy - (cy - state.pan[1]) * ratio;
+  state.zoom = newZoom;
+  if (state.zoom <= ZOOM_MIN) state.pan = [0, 0];
+  clampPan();
+  requestRender();
+}, { passive: false });
+
+var panDrag = null;
+canvasWrap.addEventListener('pointerdown', function (e) {
+  if (!state.tex || state.cropping || state.zoom <= 1 || e.button !== 0) return;
+  panDrag = { x: e.clientX, y: e.clientY };
+  canvasWrap.setPointerCapture(e.pointerId);
+  canvasWrap.classList.add('panning');
+});
+canvasWrap.addEventListener('pointermove', function (e) {
+  if (!panDrag) return;
+  var rect = canvasWrap.getBoundingClientRect();
+  state.pan[0] += (e.clientX - panDrag.x) / rect.width * 2;
+  state.pan[1] -= (e.clientY - panDrag.y) / rect.height * 2;
+  panDrag.x = e.clientX;
+  panDrag.y = e.clientY;
+  clampPan();
+  requestRender();
+});
+function endPan(e) {
+  if (!panDrag) return;
+  panDrag = null;
+  canvasWrap.classList.remove('panning');
+}
+canvasWrap.addEventListener('pointerup', endPan);
+canvasWrap.addEventListener('pointercancel', endPan);
+canvasWrap.addEventListener('dblclick', function () {
+  if (state.tex && !state.cropping) resetZoom();
+});
+
+/* ============================================================
+ * Crop tool. state.crop is a displayed-normalized rectangle.
+ * While cropping the WebGL view shows the full image and the
+ * crop rectangle is an HTML overlay with draggable handles.
+ * ============================================================ */
+var cropOverlay = document.getElementById('cropoverlay');
+var cropBox = document.getElementById('cropbox');
+var btnCrop = document.getElementById('btnCrop');
+var cropBar = document.getElementById('cropbar');
+var cropBackup = null;
+
+/* On-screen rect (px, within canvaswrap) of the full image at fit, zoom 1 */
+function fullImageScreenRect() {
+  var W = canvasWrap.clientWidth, H = canvasWrap.clientHeight;
+  var rotated = state.rot % 2 === 1;
+  var aspect = (rotated ? state.texH : state.texW) / (rotated ? state.texW : state.texH);
+  var canvasAspect = W / H;
+  var iw, ih;
+  if (aspect > canvasAspect) { iw = W; ih = W / aspect; }
+  else { ih = H; iw = H * aspect; }
+  return { x: (W - iw) / 2, y: (H - ih) / 2, w: iw, h: ih };
+}
+
+function updateCropBox() {
+  if (!state.cropping) { cropOverlay.hidden = true; return; }
+  cropOverlay.hidden = false;
+  var r = fullImageScreenRect();
+  var c = state.crop;
+  cropBox.style.left = (r.x + c.x * r.w) + 'px';
+  cropBox.style.top = (r.y + c.y * r.h) + 'px';
+  cropBox.style.width = (c.w * r.w) + 'px';
+  cropBox.style.height = (c.h * r.h) + 'px';
+}
+
+/* Displayed image aspect (width/height), accounting for 90 deg rotation */
+function dispAspect() {
+  var rotated = state.rot % 2 === 1;
+  return (rotated ? state.texH : state.texW) / (rotated ? state.texW : state.texH);
+}
+
+/* Lock a crop ratio (pixel W:H; 0 = free) and reshape to the largest
+ * centered rectangle of that ratio inside the image. */
+function setCropAspect(targetAR) {
+  state.cropAspect = targetAR;
+  var btns = document.querySelectorAll('.cropratios .ratio');
+  for (var i = 0; i < btns.length; i++) {
+    btns[i].classList.toggle('active',
+      parseFloat(btns[i].getAttribute('data-ar')) === targetAR);
+  }
+  if (targetAR > 0) {
+    var k = targetAR / dispAspect();          // normalized width/height
+    var w = Math.min(1, k), h = Math.min(1, 1 / k);
+    state.crop = { x: (1 - w) / 2, y: (1 - h) / 2, w: w, h: h };
+    updateCropBox();
+    requestRender();
+  }
+}
+
+/* Reshape a dragged rect (edges L/T/R/B, handle mode m) to the locked ratio */
+function applyRatioToRect(L, T, R, B, m) {
+  var k = state.cropAspect / dispAspect();    // normalized width/height
+  var driveWidth = m.indexOf('e') >= 0 || m.indexOf('w') >= 0; // n/s -> height drives
+  function anchorV(newH) {
+    if (m.indexOf('n') >= 0 && m.indexOf('s') < 0) T = B - newH;
+    else if (m.indexOf('s') >= 0 && m.indexOf('n') < 0) B = T + newH;
+    else { var cy = (T + B) / 2; T = cy - newH / 2; B = cy + newH / 2; }
+  }
+  function anchorH(newW) {
+    if (m.indexOf('w') >= 0 && m.indexOf('e') < 0) L = R - newW;
+    else if (m.indexOf('e') >= 0 && m.indexOf('w') < 0) R = L + newW;
+    else { var cx = (L + R) / 2; L = cx - newW / 2; R = cx + newW / 2; }
+  }
+  if (driveWidth) {
+    anchorV((R - L) / k);
+    if (T < 0 || B > 1) { T = Math.max(0, T); B = Math.min(1, B); anchorH((B - T) * k); }
+  } else {
+    anchorH((B - T) * k);
+    if (L < 0 || R > 1) { L = Math.max(0, L); R = Math.min(1, R); anchorV((R - L) / k); }
+  }
+  if (L < 0) { R -= L; L = 0; }
+  if (T < 0) { B -= T; T = 0; }
+  if (R > 1) { L -= (R - 1); R = 1; }
+  if (B > 1) { T -= (B - 1); B = 1; }
+  return { x: L, y: T, w: R - L, h: B - T };
+}
+
+function enterCropMode() {
+  if (!state.tex) return;
+  cropBackup = { x: state.crop.x, y: state.crop.y, w: state.crop.w, h: state.crop.h };
+  state.cropping = true;
+  state.zoom = 1;
+  state.pan = [0, 0];
+  setCropAspect(0);
+  btnCrop.classList.add('active');
+  cropBar.hidden = false;
+  requestRender();
+}
+
+function exitCropMode(apply) {
+  if (!state.cropping) return;
+  if (!apply && cropBackup) {
+    state.crop = cropBackup;
+  }
+  cropBackup = null;
+  state.cropping = false;
+  btnCrop.classList.remove('active');
+  cropBar.hidden = true;
+  requestRender();
+}
+
+var MIN_CROP = 0.05;
+var cropDrag = null;
+
+cropOverlay.addEventListener('pointerdown', function (e) {
+  if (!state.cropping) return;
+  var handle = e.target.getAttribute('data-h');
+  var onBox = e.target === cropBox || cropBox.contains(e.target);
+  if (!handle && !onBox) return; // clicks on the dim area do nothing
+  e.preventDefault();
+  var r = fullImageScreenRect();
+  cropDrag = {
+    mode: handle || 'move',
+    r: r,
+    startX: e.clientX,
+    startY: e.clientY,
+    start: { x: state.crop.x, y: state.crop.y, w: state.crop.w, h: state.crop.h }
+  };
+  cropOverlay.setPointerCapture(e.pointerId);
+});
+
+cropOverlay.addEventListener('pointermove', function (e) {
+  if (!cropDrag) return;
+  var r = cropDrag.r;
+  var dx = (e.clientX - cropDrag.startX) / r.w;
+  var dy = (e.clientY - cropDrag.startY) / r.h;
+  var s = cropDrag.start;
+  var x = s.x, y = s.y, w = s.w, h = s.h;
+  var m = cropDrag.mode;
+  if (m === 'move') {
+    x = Math.min(1 - w, Math.max(0, s.x + dx));
+    y = Math.min(1 - h, Math.max(0, s.y + dy));
+  } else {
+    var left = s.x, top = s.y, right = s.x + s.w, bottom = s.y + s.h;
+    if (m.indexOf('w') >= 0) left = Math.min(right - MIN_CROP, Math.max(0, s.x + dx));
+    if (m.indexOf('e') >= 0) right = Math.max(left + MIN_CROP, Math.min(1, s.x + s.w + dx));
+    if (m.indexOf('n') >= 0) top = Math.min(bottom - MIN_CROP, Math.max(0, s.y + dy));
+    if (m.indexOf('s') >= 0) bottom = Math.max(top + MIN_CROP, Math.min(1, s.y + s.h + dy));
+    if (state.cropAspect > 0) {
+      var rr = applyRatioToRect(left, top, right, bottom, m);
+      x = rr.x; y = rr.y; w = rr.w; h = rr.h;
+    } else {
+      x = left; y = top; w = right - left; h = bottom - top;
+    }
+  }
+  state.crop = { x: x, y: y, w: w, h: h };
+  updateCropBox();
+});
+
+function endCropDrag() { cropDrag = null; }
+cropOverlay.addEventListener('pointerup', endCropDrag);
+cropOverlay.addEventListener('pointercancel', endCropDrag);
+
+btnCrop.addEventListener('click', function () {
+  if (state.cropping) exitCropMode(true);
+  else enterCropMode();
+});
+document.getElementById('btnCropApply').addEventListener('click', function () { exitCropMode(true); });
+document.getElementById('btnCropCancel').addEventListener('click', function () { exitCropMode(false); });
+document.getElementById('btnCropReset').addEventListener('click', function () {
+  state.crop = { x: 0, y: 0, w: 1, h: 1 };
+  setCropAspect(0);
+  updateCropBox();
+});
+Array.prototype.forEach.call(document.querySelectorAll('.cropratios .ratio'), function (b) {
+  b.addEventListener('click', function () {
+    setCropAspect(parseFloat(b.getAttribute('data-ar')));
+  });
+});
+
+window.addEventListener('resize', requestRender);
+</script>
+</body>
+</html>

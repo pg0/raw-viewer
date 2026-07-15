@@ -2533,7 +2533,9 @@ function renderTextToCanvas(text, color) {
   g.font = fam;
   g.textAlign = 'center'; g.textBaseline = 'middle';
   g.lineJoin = 'round';
-  g.strokeStyle = 'rgba(0,0,0,0.6)'; g.lineWidth = font * 0.14;
+  // Solid outline so the text is fully opaque at 100% (a translucent stroke
+  // used to show the photo through the halo).
+  g.strokeStyle = '#000000'; g.lineWidth = font * 0.11;
   g.fillStyle = color || '#ffffff';
   var cx = c.width / 2, y0 = pad + lh / 2;
   lines.forEach(function (ln, i) {

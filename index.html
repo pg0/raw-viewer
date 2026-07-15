@@ -1418,6 +1418,112 @@ async function decodeRaw(fullRes) {
   return ok;
 }
 
+/* ============================================================
+ * LibRaw-Wasm pipeline (primary decoder)
+ * ------------------------------------------------------------
+ * dcraw 9.26 (the asm.js build above) cannot demosaic newer bodies
+ * (Sony ZV-E1, CR3, new lossless-compressed ARW, ...). LibRaw 0.22.1
+ * can. It runs in a module Web Worker and needs a real http origin
+ * that is cross-origin isolated (COOP/COEP) - see serve.py. When the
+ * page is opened via file:// the module/worker fails to load and we
+ * fall back to dcraw, then to the embedded JPEG.
+ * ============================================================ */
+var librawClassPromise = null;
+function getLibRawClass() {
+  if (!librawClassPromise) {
+    librawClassPromise = import('./libraw/index.js')
+      .then(function (m) { return m.default; })
+      .catch(function (e) { librawClassPromise = null; throw e; });
+  }
+  return librawClassPromise;
+}
+
+/* Convert LibRaw's interleaved RGB (Uint16 at 16 bit, Uint8 at 8 bit)
+ * into a Float32 RGBA texture buffer 0..1, downscaling by integer stride
+ * when the image exceeds the GL max texture size (mirrors ppmToFloatRGBA). */
+function librawToFloatRGBA(im, maxDim) {
+  var width = im.width, height = im.height;
+  var colors = im.colors || 3;
+  var src = im.data;                        // Uint16Array or Uint8Array
+  var maxval = im.bits >= 16 ? 65535 : 255;
+  var step = 1, outW = width, outH = height;
+  if (maxDim && Math.max(width, height) > maxDim) {
+    step = Math.ceil(Math.max(width, height) / maxDim);
+    outW = Math.floor(width / step);
+    outH = Math.floor(height / step);
+  }
+  var out = new Float32Array(outW * outH * 4);
+  var inv = 1 / maxval;
+  var o = 0;
+  for (var y = 0; y < outH; y++) {
+    var rowBase = (y * step) * width * colors;
+    for (var x = 0; x < outW; x++) {
+      var i = rowBase + (x * step) * colors;
+      out[o++] = src[i] * inv;
+      out[o++] = src[i + 1] * inv;
+      out[o++] = src[i + 2] * inv;
+      out[o++] = 1;
+    }
+  }
+  return { data: out, width: outW, height: outH };
+}
+
+/* Decode state.rawBytes with LibRaw. Returns true on success. Returns
+ * false (without a hard error) when LibRaw is unavailable (file://) or
+ * cannot decode the file, so loadFile can fall back to dcraw / JPEG. */
+async function decodeRawLibraw(fullRes) {
+  if (!state.rawBytes || state.decoding) return false;
+  var LibRawClass;
+  try {
+    LibRawClass = await getLibRawClass();
+  } catch (eLoad) {
+    return false; // module/worker not loadable (e.g. file:// without a server)
+  }
+  state.decoding = true;
+  showOverlay(fullRes
+    ? 'Decoding RAW at full resolution (LibRaw)...'
+    : 'Decoding RAW (LibRaw)...');
+  await nextFrame();
+  await nextFrame();
+  var raw = null, ok = false;
+  try {
+    raw = new LibRawClass();
+    // open() transfers the buffer to the worker (it gets detached), so pass a
+    // copy - state.rawBytes must survive for re-decode / the full-res toggle.
+    await raw.open(state.rawBytes.slice(), {
+      outputBps: 16,      // 16-bit output
+      outputColor: 1,     // sRGB primaries
+      gamm: [1, 1],       // linear light (matches dcraw -g 1 1)
+      noAutoBright: true, // -W : no auto brightness
+      useCameraWb: true,  // -w : camera white balance
+      halfSize: !fullRes  // half size unless full-res requested
+    });
+    var im = await raw.imageData(); // { width, height, colors, bits, data }
+    if (!im || !im.data || !im.width) return false;
+    var maxTex = gl ? gl.getParameter(gl.MAX_TEXTURE_SIZE) : 4096;
+    var img = librawToFloatRGBA(im, maxTex);
+    im = null;
+    if (!gl) return false;
+    uploadTexture(img);
+    img.data = null; img = null;
+    ok = true;
+    thumbImg.style.display = 'none';
+    if (thumbImg.src) {
+      URL.revokeObjectURL(thumbImg.src);
+      thumbImg.removeAttribute('src');
+    }
+    setControlsEnabled(true);
+    requestRender();
+  } catch (eDec) {
+    ok = false; // unsupported / corrupt / OOM - caller falls back
+  } finally {
+    if (raw) { try { raw.dispose(); } catch (eDisp) {} }
+    state.decoding = false;
+    hideOverlay();
+  }
+  return ok;
+}
+
 /* sRGB (8-bit) to linear light lookup, built once */
 var SRGB_TO_LIN = (function () {
   var t = new Float32Array(256);
@@ -1580,22 +1686,26 @@ async function loadFile(file) {
     // no thumbnail, not fatal
   }
 
-  // c. Full linear 16-bit decode (half size). Skip it when dcraw already
-  //    reported no decodable raw data (e.g. Sony ZV-E1) - the decode would
-  //    only churn for seconds before failing, so go straight to the fallback.
+  // c. Full linear 16-bit decode (half size). LibRaw is the primary decoder
+  //    (handles ZV-E1, CR3, new ARW, ...); it needs a server (see serve.py).
+  //    When it is unavailable (file://) or fails, fall back to the bundled
+  //    dcraw - but skip dcraw when identify already reported no decodable raw
+  //    (e.g. Sony ZV-E1), where dcraw would only churn before failing.
   await nextFrame();
   var noRawData = /Number of raw images:\s*0\b/.test(metaText);
-  var ok = noRawData ? false : await decodeRaw(false);
+  var ok = await decodeRawLibraw(false);
+  if (!ok && !noRawData) ok = await decodeRaw(false);
 
-  // c2. Fallback for RAWs dcraw 9.26 cannot decode (e.g. Sony ZV-E1): show the
-  //     embedded JPEG so the file is at least viewable, croppable and
-  //     exportable, and say plainly that it is not the full raw.
+  // c2. Last resort for RAWs neither decoder can handle: show the embedded
+  //     JPEG so the file is at least viewable, croppable and exportable, and
+  //     say plainly that it is not the full raw.
   if (!ok && state.thumbBytes) {
     var dims = await loadEmbeddedThumb(state.thumbBytes);
     if (dims) {
-      toast('RAW decode not supported for this camera (e.g. Sony ZV-E1). ' +
-        'Showing the embedded JPEG preview - ' + dims.w + ' x ' + dims.h +
-        ', reduced quality, not the full raw.');
+      toast('Full RAW decode unavailable for this file. Showing the embedded ' +
+        'JPEG preview - ' + dims.w + ' x ' + dims.h + ', reduced quality, not ' +
+        'the full raw. (For ZV-E1 and other modern bodies, run via serve.cmd ' +
+        'to enable the LibRaw decoder.)');
       ok = true;
     }
   }
@@ -1821,7 +1931,8 @@ document.getElementById('chkFullRes').addEventListener('change', async function 
   var chk = this;
   var want = chk.checked;
   if (want === state.fullRes) return;
-  var ok = await decodeRaw(want);
+  var ok = await decodeRawLibraw(want);
+  if (!ok) ok = await decodeRaw(want);
   if (ok) {
     state.fullRes = want;
   } else {

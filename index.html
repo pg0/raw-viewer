@@ -69,6 +69,15 @@
   }
   #btnViewSize:hover { background: rgba(40,40,40,.9); }
   #btnViewSize svg { width: 13px; height: 13px; display: block; }
+  /* 100% / fit toggle (bottom-left of the photo) */
+  #btn100 {
+    position: absolute; left: 10px; bottom: 10px; z-index: 8;
+    background: rgba(20,20,20,.78); color: #d8d8d8; border: 1px solid #3a3a3a;
+    border-radius: 6px; padding: 6px 10px; font-size: 12px; cursor: pointer;
+    font-variant-numeric: tabular-nums;
+  }
+  #btn100:hover { background: rgba(40,40,40,.9); }
+  #btn100[hidden] { display: none; }
   #glcanvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
   #thumb {
     position: absolute; inset: 0;
@@ -506,6 +515,7 @@
         <p>RAW (ARW, CR2, NEF, DNG, RAF ...), JPEG, PNG, WebP, HEIC - or a .cube LUT</p>
       </div>
       <div id="zoomchip" hidden></div>
+      <button id="btn100" hidden title="Toggle 100% (actual pixels) vs fit">100%</button>
       <svg id="gizmo" hidden></svg>
       <button id="btnViewSize" title="Resize photo pane" aria-label="Resize photo pane">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
@@ -1649,6 +1659,8 @@ function setControlsEnabled(on) {
   document.getElementById('btnAddEmoji').disabled = !on;
   document.getElementById('chkFullRes').disabled = !on;
   syncFullResRow();
+  var b100 = document.getElementById('btn100');
+  if (b100) b100.hidden = !on;
   updateRotField();           // controls enable right after a fresh load (angle reset to 0)
   if (on) updateCropAvail();  // refine the Crop button by orthogonality
 }
@@ -3001,7 +3013,7 @@ window.addEventListener('drop', function (e) {
  * double click resets to fit. Screen render only - histogram
  * and export always use the full image.
  * ============================================================ */
-var ZOOM_MIN = 1, ZOOM_MAX = 16;
+var ZOOM_MIN = 1, ZOOM_MAX = 64;
 var canvasWrap = document.getElementById('canvaswrap');
 var zoomChip = document.getElementById('zoomchip');
 
@@ -3012,6 +3024,7 @@ function updateZoomChip() {
   }
   zoomChip.hidden = !zoomed;
   canvasWrap.classList.toggle('zoomed', zoomed);
+  update100Label();
 }
 
 function resetZoom() {
@@ -3019,6 +3032,33 @@ function resetZoom() {
   state.pan = [0, 0];
   requestRender();
 }
+
+/* Zoom multiplier that shows the texture at 1:1 with device pixels (100%). */
+function zoomFor100() {
+  if (!state.tex || !canvas.height) return 1;
+  var A = state.texW / state.texH;
+  var vpAspect = canvas.width / canvas.height;
+  var k = Math.min(vpAspect / A, 1);           // contain scale at angle 0
+  var z = state.texH / (k * canvas.height);
+  return Math.max(1, Math.min(ZOOM_MAX, z));
+}
+function update100Label() {
+  var b = document.getElementById('btn100');
+  if (b) b.textContent = state.zoom > 1.001 ? 'Fit' : '100%';
+}
+function toggle100() {
+  if (!state.tex) return;
+  if (state.zoom > 1.001) {
+    resetZoom();
+  } else {
+    state.zoom = zoomFor100();
+    state.pan = [0, 0];
+    clampPan();
+    requestRender();
+  }
+  update100Label();
+}
+document.getElementById('btn100').addEventListener('click', toggle100);
 
 /* Mobile photo-pane size toggle: switch between 2/3 and 1/3 of the screen. */
 (function () {

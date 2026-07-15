@@ -214,7 +214,11 @@
   .overlay-color { width: 26px; height: 22px; padding: 0; border: 1px solid #444; border-radius: 4px; background: #333; cursor: pointer; }
   #overlaypanel.ovdrag { outline: 2px dashed #4a90d9; outline-offset: -2px; border-radius: 6px; background: rgba(74,144,217,.06); }
   .overlay-item.selected { border-color: #3a72ad; box-shadow: 0 0 0 1px #3a72ad; }
+  .overlay-item.dragging { opacity: .5; }
+  .overlay-item.drop-target { border-top: 2px solid #4a90d9; }
   .overlay-top { cursor: pointer; }
+  .overlay-drag { cursor: grab; color: #777; font-size: 14px; padding: 0 4px; flex: 0 0 auto; user-select: none; }
+  .overlay-drag:active { cursor: grabbing; }
   #emojipalette { display: flex; flex-wrap: wrap; gap: 3px; margin-top: 6px; }
   #emojipalette[hidden] { display: none; }
   #emojipalette button { font-size: 18px; line-height: 1; padding: 5px; min-width: 34px; background: #262626; border: 1px solid #383838; border-radius: 5px; cursor: pointer; }
@@ -251,7 +255,10 @@
   #cropbar { display: flex; flex-direction: column; gap: 6px; margin-bottom: 12px; }
   #cropbar[hidden] { display: none; }
   .cropratios button { padding: 4px 9px; font-size: 11px; }
-  .cropratios button.active { background: #2d5f95; border-color: #3a72ad; color: #fff; }
+  .cropbar-top { align-items: center; }
+  .cropbar-top .ratio { padding: 4px 9px; font-size: 11px; }
+  .cropbar-sep { flex: 1 1 auto; }               /* pushes Apply / Cancel to the right */
+  .ratio.active { background: #2d5f95; border-color: #3a72ad; color: #fff; }
   .eyebtn {
     background: none; border: none; padding: 0; margin: 0;
     color: #9a9a9a; cursor: pointer; line-height: 0;
@@ -534,14 +541,15 @@
       <button id="btnCrop" disabled>Crop</button>
     </div>
     <div id="cropbar" hidden>
-      <div class="btnrow">
-        <button id="btnCropApply" class="primary">Apply</button>
+      <div class="btnrow cropbar-top">
         <button id="btnCropReset">Full</button>
+        <button class="ratio active" data-w="0" data-h="0" title="Free ratio">Free</button>
+        <button id="btnOrient" title="Swap portrait / landscape">&#8646; Landscape</button>
+        <span class="cropbar-sep"></span>
+        <button id="btnCropApply" class="primary">Apply</button>
         <button id="btnCropCancel">Cancel</button>
       </div>
       <div class="btnrow cropratios">
-        <button class="ratio active" data-w="0" data-h="0" title="Free ratio">Free</button>
-        <button id="btnOrient" title="Swap portrait / landscape">&#8646; Landscape</button>
         <button class="ratio" data-w="1" data-h="1" title="Square">1:1</button>
         <button class="ratio" data-w="5" data-h="4">5:4</button>
         <button class="ratio" data-w="16" data-h="9">16:9</button>
@@ -2484,7 +2492,7 @@ function addSourceOverlay(src, name, over) {
   var thumb = tc.toDataURL('image/png');
   if (src.close) src.close();
   var ov = {
-    name: name, tex: tex, w: w, h: h,
+    name: name, tex: tex, w: w, h: h, kind: 'image',
     mode: 2, opacity: 0.7, tile: false, scale: 1,   // Screen @ 70% default (images)
     offX: 0, offY: 0, keepAspect: false, chroma: null, chromaThresh: 0.15,
     thumb: thumb
@@ -2547,27 +2555,65 @@ function renderEmojiToCanvas(emoji) {
   return c;
 }
 
-/* Custom in-app modal for entering overlay text (replaces window.prompt). */
+/* Replace an existing overlay's image (used when editing text), keeping its
+ * transform / blend / opacity. */
+function updateOverlaySource(idx, src, name, extra) {
+  var ov = state.overlays[idx];
+  if (!ov) return;
+  if (ov.tex) gl.deleteTexture(ov.tex);
+  ov.w = src.width; ov.h = src.height;
+  ov.tex = uploadOverlayTexture(src);
+  var ts = 40, r = Math.min(ts / ov.w, ts / ov.h, 1);
+  var tc = document.createElement('canvas');
+  tc.width = Math.max(1, Math.round(ov.w * r));
+  tc.height = Math.max(1, Math.round(ov.h * r));
+  tc.getContext('2d').drawImage(src, 0, 0, tc.width, tc.height);
+  ov.thumb = tc.toDataURL('image/png');
+  ov.name = name;
+  if (extra) Object.keys(extra).forEach(function (k) { ov[k] = extra[k]; });
+  renderOverlayList();
+  requestRender();
+}
+
+/* Custom in-app modal for entering overlay text (replaces window.prompt).
+ * Also used to edit an existing text overlay (double-click it in the list). */
 var textModal = document.getElementById('textmodal');
 var textModalInput = document.getElementById('textmodalInput');
 var textModalColor = document.getElementById('textmodalColor');
+var textModalEditIdx = null;
 
-function openTextModal() {
-  textModalInput.value = '';
+function openTextModal(editIdx) {
+  textModalEditIdx = (editIdx == null) ? null : editIdx;
+  var title = document.getElementById('textmodalTitle');
+  if (textModalEditIdx != null && state.overlays[textModalEditIdx]) {
+    var ov = state.overlays[textModalEditIdx];
+    textModalInput.value = ov.text || '';
+    textModalColor.value = ov.textColor || '#ffffff';
+    title.textContent = 'Edit text overlay';
+  } else {
+    textModalEditIdx = null;
+    textModalInput.value = '';
+    textModalColor.value = '#ffffff';
+    title.textContent = 'Add text overlay';
+  }
   textModal.hidden = false;
-  // focus after the modal paints
-  requestAnimationFrame(function () { textModalInput.focus(); });
+  requestAnimationFrame(function () { textModalInput.focus(); textModalInput.select(); });
 }
 function closeTextModal() { textModal.hidden = true; }
 function submitTextModal() {
   var t = textModalInput.value.replace(/\s+$/, '').replace(/^\s+/, '');
   if (!t) { closeTextModal(); return; }
   var color = textModalColor.value;
+  var canvas = renderTextToCanvas(t, color);
+  var name = 'Text: ' + t.replace(/\n/g, ' ');
+  if (textModalEditIdx != null && state.overlays[textModalEditIdx]) {
+    updateOverlaySource(textModalEditIdx, canvas, name, { text: t, textColor: color });
+  } else {
+    addSourceOverlay(canvas, name, { mode: 0, opacity: 1, keepAspect: true, kind: 'text', text: t, textColor: color });
+  }
   closeTextModal();
-  addSourceOverlay(renderTextToCanvas(t, color), 'Text: ' + t.replace(/\n/g, ' '),
-    { mode: 0, opacity: 1, keepAspect: true });
 }
-function addTextOverlay() { openTextModal(); }
+function addTextOverlay() { openTextModal(null); }
 
 document.getElementById('textmodalOk').addEventListener('click', submitTextModal);
 document.getElementById('textmodalCancel').addEventListener('click', closeTextModal);
@@ -2578,7 +2624,7 @@ textModalInput.addEventListener('keydown', function (e) {
 });
 
 function addEmojiOverlay(emoji) {
-  addSourceOverlay(renderEmojiToCanvas(emoji), emoji, { mode: 0, opacity: 1, keepAspect: true });
+  addSourceOverlay(renderEmojiToCanvas(emoji), emoji, { mode: 0, opacity: 1, keepAspect: true, kind: 'emoji' });
 }
 
 var EMOJIS = ['😀','😎','😍','🥳','😂','😉',
@@ -2612,6 +2658,18 @@ function removeOverlay(idx) {
 function selectOverlay(idx) {
   state.selectedOverlay = (state.selectedOverlay === idx) ? null : idx;
   renderOverlayList();
+}
+
+/* Move an overlay in the stack (draw order = array order; later = on top). */
+function reorderOverlay(from, to) {
+  if (from === to || from < 0 || from >= state.overlays.length) return;
+  to = Math.max(0, Math.min(state.overlays.length - 1, to));
+  var selObj = state.selectedOverlay != null ? state.overlays[state.selectedOverlay] : null;
+  var moved = state.overlays.splice(from, 1)[0];
+  state.overlays.splice(to, 0, moved);
+  state.selectedOverlay = selObj ? state.overlays.indexOf(selObj) : null;
+  renderOverlayList();
+  requestRender();
 }
 
 function hexToRgb(hex) {
@@ -2656,7 +2714,14 @@ function renderOverlayList() {
 
     var top = document.createElement('div');
     top.className = 'overlay-top';
-    top.title = 'Click to select, then drag on the photo to move';
+    top.title = (ov.kind === 'text')
+      ? 'Click to select (drag on photo to move); double-click to edit text'
+      : 'Click to select, then drag on the photo to move';
+    var handle = document.createElement('span');
+    handle.className = 'overlay-drag';
+    handle.textContent = '⠿'; // braille dots = drag grip
+    handle.title = 'Drag to reorder (top of list = bottom layer)';
+    handle.draggable = true;
     var img = document.createElement('img');
     img.className = 'overlay-thumb';
     img.src = ov.thumb;
@@ -2669,9 +2734,35 @@ function renderOverlayList() {
     rm.textContent = '×';
     rm.title = 'Remove overlay';
     rm.addEventListener('click', function (e) { e.stopPropagation(); removeOverlay(idx); });
-    // Click the thumbnail/name row to select this overlay for canvas dragging.
+    // Click the row to select; double-click a text overlay to edit it.
     top.addEventListener('click', function () { selectOverlay(idx); });
-    top.appendChild(img); top.appendChild(name); top.appendChild(rm);
+    if (ov.kind === 'text') {
+      top.addEventListener('dblclick', function () { openTextModal(idx); });
+    }
+    top.appendChild(handle); top.appendChild(img); top.appendChild(name); top.appendChild(rm);
+
+    // Drag-and-drop layer reorder (via the grip handle).
+    handle.addEventListener('dragstart', function (e) {
+      e.dataTransfer.setData('text/plain', String(idx));
+      e.dataTransfer.effectAllowed = 'move';
+      item.classList.add('dragging');
+    });
+    handle.addEventListener('dragend', function () {
+      item.classList.remove('dragging');
+      Array.prototype.forEach.call(overlayList.children, function (c) { c.classList.remove('drop-target'); });
+    });
+    item.addEventListener('dragover', function (e) {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+      item.classList.add('drop-target');
+    });
+    item.addEventListener('dragleave', function () { item.classList.remove('drop-target'); });
+    item.addEventListener('drop', function (e) {
+      e.preventDefault();
+      item.classList.remove('drop-target');
+      var from = parseInt(e.dataTransfer.getData('text/plain'), 10);
+      if (!isNaN(from)) reorderOverlay(from, idx);
+    });
 
     var ctrls = document.createElement('div');
     ctrls.className = 'overlay-ctrls';
@@ -2708,13 +2799,7 @@ function renderOverlayList() {
       function (v) { return v.toFixed(2) + '×'; },
       function (v) { ov.scale = v; });
 
-    var offXRow = mkOverlaySlider('Offset X', -1, 1, 0.01, ov.offX || 0,
-      function (v) { return v.toFixed(2); },
-      function (v) { ov.offX = v; });
-
-    var offYRow = mkOverlaySlider('Offset Y', -1, 1, 0.01, ov.offY || 0,
-      function (v) { return v.toFixed(2); },
-      function (v) { ov.offY = v; });
+    // Position is set by dragging the overlay on the photo (no offset sliders).
 
     // Optional alpha (chroma) color: key a colour out to transparent.
     var chromaHead = document.createElement('div');
@@ -2753,7 +2838,6 @@ function renderOverlayList() {
 
     item.appendChild(top); item.appendChild(ctrls);
     item.appendChild(opRow); item.appendChild(scaleRow);
-    item.appendChild(offXRow); item.appendChild(offYRow);
     item.appendChild(chromaHead); item.appendChild(threshRow);
     overlayList.appendChild(item);
   });
@@ -3064,7 +3148,7 @@ function ratioBtnAR(b) {
 }
 
 function updateRatioActive() {
-  var btns = document.querySelectorAll('.cropratios .ratio');
+  var btns = document.querySelectorAll('#cropbar .ratio');
   for (var i = 0; i < btns.length; i++) {
     var ar = ratioBtnAR(btns[i]);
     var active = ar === 0
@@ -3076,7 +3160,7 @@ function updateRatioActive() {
 
 /* Relabel ratio buttons + the orientation toggle for the current orientation. */
 function updateRatioLabels() {
-  var btns = document.querySelectorAll('.cropratios .ratio');
+  var btns = document.querySelectorAll('#cropbar .ratio');
   for (var i = 0; i < btns.length; i++) {
     var w = parseFloat(btns[i].getAttribute('data-w')), h = parseFloat(btns[i].getAttribute('data-h'));
     if (w > 0 && h > 0 && w !== h) {
@@ -3214,7 +3298,7 @@ document.getElementById('btnCropReset').addEventListener('click', function () {
   setCropAspect(0);
   updateCropBox();
 });
-Array.prototype.forEach.call(document.querySelectorAll('.cropratios .ratio'), function (b) {
+Array.prototype.forEach.call(document.querySelectorAll('#cropbar .ratio'), function (b) {
   b.addEventListener('click', function () {
     var w = parseFloat(b.getAttribute('data-w')), h = parseFloat(b.getAttribute('data-h'));
     state.cropRatioWH = (w > 0 && h > 0) ? [w, h] : null;

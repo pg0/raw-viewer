@@ -405,6 +405,42 @@
   }
   #toast.visible { opacity: 1; }
 
+  /* Text-overlay modal */
+  #textmodal {
+    position: fixed; inset: 0;
+    display: flex; align-items: center; justify-content: center;
+    background: rgba(0,0,0,.55);
+    z-index: 60;
+    padding: 16px;
+  }
+  #textmodal[hidden] { display: none; }
+  .modal-card {
+    width: 100%; max-width: 420px;
+    background: #232323;
+    border: 1px solid #3a3a3a;
+    border-radius: 10px;
+    padding: 18px;
+    box-shadow: 0 12px 40px rgba(0,0,0,.6);
+  }
+  .modal-card h3 { font-size: 14px; font-weight: 600; margin-bottom: 12px; color: #e0e0e0; }
+  #textmodalInput {
+    width: 100%;
+    background: #1a1a1a;
+    color: #eee;
+    border: 1px solid #444;
+    border-radius: 6px;
+    padding: 9px 10px;
+    font-size: 15px;
+    font-family: inherit;
+    resize: vertical;
+  }
+  #textmodalInput:focus { outline: none; border-color: #4a90d9; }
+  .modal-row { display: flex; align-items: center; justify-content: space-between; margin-top: 10px; gap: 10px; }
+  .modal-color { display: inline-flex; align-items: center; gap: 7px; font-size: 12px; color: #bbb; }
+  .modal-color input[type=color] { width: 30px; height: 24px; padding: 0; border: 1px solid #444; border-radius: 4px; background: #333; cursor: pointer; }
+  .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
+  .modal-actions button { padding: 8px 16px; }
+
   /* Mobile / narrow: stack the photo on top (always visible), controls scroll
      below. Open / Save stay in the sticky top bar. */
   @media (max-width: 820px) {
@@ -580,6 +616,20 @@
   </aside>
 </div>
 <div id="toast"></div>
+<div id="textmodal" hidden>
+  <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="textmodalTitle">
+    <h3 id="textmodalTitle">Add text overlay</h3>
+    <textarea id="textmodalInput" rows="2" placeholder="Type your text..."></textarea>
+    <div class="modal-row">
+      <label class="modal-color">Color <input type="color" id="textmodalColor" value="#ffffff"></label>
+      <span class="hint">Enter to add, Esc to cancel</span>
+    </div>
+    <div class="modal-actions">
+      <button id="textmodalCancel">Cancel</button>
+      <button id="textmodalOk" class="primary">Add</button>
+    </div>
+  </div>
+</div>
 <input type="file" id="fileinput" hidden
   accept=".arw,.cr2,.cr3,.nef,.nrw,.dng,.raf,.orf,.rw2,.raw,.pef,.srw,.srf,.sr2,.kdc,.dcr,.mrw,.3fr,.erf,.mef,.mos,.x3f,.gpr,.rwl,.iiq,.cap,.fff,.arq,.jpg,.jpeg,.png,.webp,.bmp,.gif,.heic,.heif">
 <input type="file" id="lutinput" hidden accept=".cube">
@@ -2458,24 +2508,31 @@ async function addOverlay(file) {
   addSourceOverlay(src, file.name);
 }
 
-/* Render a text string to a transparent canvas (white with a dark outline). */
-function renderTextToCanvas(text) {
-  var pad = 28, font = 150;
+/* Render a (possibly multi-line) text string to a transparent canvas, in the
+ * given colour with a dark outline for legibility over any background. */
+function renderTextToCanvas(text, color) {
+  var pad = 28, font = 150, lh = font * 1.2;
   var fam = '800 ' + font + 'px system-ui, "Segoe UI", Arial, sans-serif';
+  var lines = text.split('\n');
   var meas = document.createElement('canvas').getContext('2d');
   meas.font = fam;
-  var tw = Math.ceil(meas.measureText(text).width);
+  var tw = 0;
+  lines.forEach(function (ln) { tw = Math.max(tw, Math.ceil(meas.measureText(ln).width)); });
   var c = document.createElement('canvas');
   c.width = Math.max(1, tw + pad * 2);
-  c.height = Math.max(1, Math.ceil(font * 1.35) + pad * 2);
+  c.height = Math.max(1, Math.ceil(lh * lines.length) + pad * 2);
   var g = c.getContext('2d');
   g.font = fam;
   g.textAlign = 'center'; g.textBaseline = 'middle';
   g.lineJoin = 'round';
   g.strokeStyle = 'rgba(0,0,0,0.6)'; g.lineWidth = font * 0.14;
-  g.strokeText(text, c.width / 2, c.height / 2);
-  g.fillStyle = '#ffffff';
-  g.fillText(text, c.width / 2, c.height / 2);
+  g.fillStyle = color || '#ffffff';
+  var cx = c.width / 2, y0 = pad + lh / 2;
+  lines.forEach(function (ln, i) {
+    var y = y0 + i * lh;
+    g.strokeText(ln, cx, y);
+    g.fillText(ln, cx, y);
+  });
   return c;
 }
 
@@ -2490,13 +2547,35 @@ function renderEmojiToCanvas(emoji) {
   return c;
 }
 
-function addTextOverlay() {
-  var t = window.prompt('Overlay text:', 'Sample');
-  if (t == null) return;
-  t = t.trim();
-  if (!t) return;
-  addSourceOverlay(renderTextToCanvas(t), 'Text: ' + t, { mode: 0, opacity: 1, keepAspect: true });
+/* Custom in-app modal for entering overlay text (replaces window.prompt). */
+var textModal = document.getElementById('textmodal');
+var textModalInput = document.getElementById('textmodalInput');
+var textModalColor = document.getElementById('textmodalColor');
+
+function openTextModal() {
+  textModalInput.value = '';
+  textModal.hidden = false;
+  // focus after the modal paints
+  requestAnimationFrame(function () { textModalInput.focus(); });
 }
+function closeTextModal() { textModal.hidden = true; }
+function submitTextModal() {
+  var t = textModalInput.value.replace(/\s+$/, '').replace(/^\s+/, '');
+  if (!t) { closeTextModal(); return; }
+  var color = textModalColor.value;
+  closeTextModal();
+  addSourceOverlay(renderTextToCanvas(t, color), 'Text: ' + t.replace(/\n/g, ' '),
+    { mode: 0, opacity: 1, keepAspect: true });
+}
+function addTextOverlay() { openTextModal(); }
+
+document.getElementById('textmodalOk').addEventListener('click', submitTextModal);
+document.getElementById('textmodalCancel').addEventListener('click', closeTextModal);
+textModal.addEventListener('mousedown', function (e) { if (e.target === textModal) closeTextModal(); });
+textModalInput.addEventListener('keydown', function (e) {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submitTextModal(); }
+  else if (e.key === 'Escape') { e.preventDefault(); closeTextModal(); }
+});
 
 function addEmojiOverlay(emoji) {
   addSourceOverlay(renderEmojiToCanvas(emoji), emoji, { mode: 0, opacity: 1, keepAspect: true });

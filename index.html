@@ -172,6 +172,14 @@
   .credit a:hover { text-decoration: underline; }
 
   .btnrow { display: flex; gap: 6px; flex-wrap: wrap; }
+  .btnrow .wide { flex: 1 1 100%; }
+  .toolrow { align-items: center; }
+  .iconbtn { display: inline-flex; align-items: center; justify-content: center; padding: 6px; line-height: 0; }
+  .rotfield { display: inline-flex; align-items: center; gap: 1px; background: #333; border: 1px solid #444; border-radius: 5px; padding: 0 6px 0 4px; }
+  .rotfield input { width: 32px; background: none; border: none; color: #ddd; font-size: 12px; font-family: inherit; padding: 5px 0; text-align: right; -moz-appearance: textfield; }
+  .rotfield input::-webkit-inner-spin-button, .rotfield input::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+  .rotfield .rotdeg-suffix { color: #888; font-size: 12px; }
+  .rotfield:has(input:disabled) { opacity: .5; }
   button {
     background: #333;
     color: #ddd;
@@ -377,15 +385,22 @@
       <div id="glerror" hidden>WebGL2 is not available in this browser - the viewer cannot render.</div>
     </div>
     <div id="footer">
-      Wheel: zoom &#183; Drag: pan &#183; Double-click: fit &#183; Supported formats (dcraw 9.26): ARW, CR2, NEF, DNG, RAF, ORF, RW2, PEF, SRW, SRF, SR2, KDC, DCR, MRW, 3FR, ERF, MEF, MOS, X3F. Very new formats such as CR3 or newer lossless-compressed ARW are not supported.
+      Wheel: zoom &#183; Drag: pan &#183; Double-click: fit &#183; RAW via LibRaw (run serve.cmd or use the live site) covers 1000+ modern bodies - Sony ARW incl. ZV-E1, Canon CR2/CR3, Nikon NEF, DNG, RAF, ORF, RW2 and more; dcraw decodes older bodies offline (file://). Plus JPEG, PNG, WebP, HEIC and .cube LUTs.
     </div>
   </main>
   <aside id="sidebar">
     <div class="btnrow">
-      <button id="btnOpen" class="primary">Open file</button>
-      <button id="btnRotate" disabled>Rotate 90&#176;</button>
-      <button id="btnCrop" disabled>Crop</button>
+      <button id="btnOpen" class="primary wide">Open file</button>
+    </div>
+    <div class="btnrow toolrow">
       <button id="btnReset" disabled>Reset all</button>
+      <button id="btnRotateCW" class="iconbtn" disabled title="Rotate 90&#176; clockwise" aria-label="Rotate 90 degrees clockwise"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg></button>
+      <button id="btnRotateCCW" class="iconbtn" disabled title="Rotate 90&#176; counter-clockwise" aria-label="Rotate 90 degrees counter-clockwise"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg></button>
+      <span class="rotfield" title="Rotation in degrees (snaps to 90&#176;)">
+        <input id="rotDeg" type="number" step="90" min="0" max="270" value="0" disabled>
+        <span class="rotdeg-suffix">&#176;</span>
+      </span>
+      <button id="btnCrop" disabled>Crop</button>
     </div>
     <div id="cropbar" hidden>
       <div class="btnrow">
@@ -1210,11 +1225,14 @@ function readFileBytes(file) {
 }
 
 function setControlsEnabled(on) {
-  document.getElementById('btnRotate').disabled = !on;
+  document.getElementById('btnRotateCW').disabled = !on;
+  document.getElementById('btnRotateCCW').disabled = !on;
+  document.getElementById('rotDeg').disabled = !on;
   document.getElementById('btnCrop').disabled = !on;
   document.getElementById('btnReset').disabled = !on;
   document.getElementById('btnExport').disabled = !on;
   document.getElementById('chkFullRes').disabled = !on;
+  updateRotField(); // controls enable right after a fresh load (rotation reset to 0)
 }
 
 /* Slider construction */
@@ -1929,14 +1947,35 @@ fileInput.addEventListener('change', function () {
 document.getElementById('btnOpen').addEventListener('click', function () { fileInput.click(); });
 document.getElementById('btnOpen2').addEventListener('click', function () { fileInput.click(); });
 
-document.getElementById('btnRotate').addEventListener('click', function () {
-  state.rot = (state.rot + 1) % 4;
-  // Zoom/pan and the displayed-space crop do not survive a rotation
-  // intuitively - reset them to keep the mapping unambiguous.
+// Reflect state.rot (0..3 quarter-turns) into the degree field.
+function updateRotField() {
+  var f = document.getElementById('rotDeg');
+  if (f) f.value = (((state.rot % 4) + 4) % 4) * 90;
+}
+// Rotate to a given number of quarter-turns (any integer, wrapped 0..3).
+// Zoom/pan and the displayed-space crop do not survive a rotation intuitively,
+// so reset them to keep the mapping unambiguous.
+function setRotation(quarterTurns) {
+  state.rot = (((quarterTurns % 4) + 4) % 4);
   state.zoom = 1;
   state.pan = [0, 0];
   state.crop = { x: 0, y: 0, w: 1, h: 1 };
+  updateRotField();
   requestRender();
+}
+document.getElementById('btnRotateCW').addEventListener('click', function () { setRotation(state.rot + 1); });
+document.getElementById('btnRotateCCW').addEventListener('click', function () { setRotation(state.rot - 1); });
+var rotDeg = document.getElementById('rotDeg');
+// The render engine only rotates in 90-degree steps, so a typed angle snaps
+// to the nearest quarter-turn.
+function applyRotFromField() {
+  var deg = parseFloat(rotDeg.value);
+  if (isNaN(deg)) { updateRotField(); return; }
+  setRotation(Math.round(deg / 90));
+}
+rotDeg.addEventListener('change', applyRotFromField);
+rotDeg.addEventListener('keydown', function (e) {
+  if (e.key === 'Enter') { applyRotFromField(); rotDeg.blur(); }
 });
 document.getElementById('btnReset').addEventListener('click', resetAllSliders);
 document.getElementById('btnExport').addEventListener('click', exportJPEG);

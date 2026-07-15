@@ -9,7 +9,7 @@ Live demo: <https://pg0.github.io/raw-viewer/>
 - RAW decode (LibRaw + dcraw), plus JPEG / PNG / WebP / BMP / GIF / HEIC
 - Real-time WebGL2 adjustments: exposure, contrast, highlights/shadows, white balance, saturation, vibrance, film grain (filmgrainer-style, image-anchored)
 - Two `.cube` LUT slots (converter + style) with per-slot intensity
-- Crop with aspect presets (Free / Mobile 9:16 / 4:5 / 1:1 / 16:9), rotate, zoom/pan
+- Crop with aspect presets (Free / Mobile 9:16 / 4:5 / 1:1 / 16:9), rotate (90&deg; CW/CCW icons + degree field), zoom/pan
 - Histogram, per-group show/hide (A/B compare), JPEG export at full resolution
 
 ## Two ways to run

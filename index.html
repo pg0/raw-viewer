@@ -397,7 +397,7 @@
       <button id="btnRotateCW" class="iconbtn" disabled title="Rotate 90&#176; clockwise" aria-label="Rotate 90 degrees clockwise"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg></button>
       <button id="btnRotateCCW" class="iconbtn" disabled title="Rotate 90&#176; counter-clockwise" aria-label="Rotate 90 degrees counter-clockwise"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg></button>
       <span class="rotfield" title="Rotation in degrees (snaps to 90&#176;)">
-        <input id="rotDeg" type="number" step="90" min="0" max="270" value="0" disabled>
+        <input id="rotDeg" type="number" step="1" min="0" max="359" value="0" disabled>
         <span class="rotdeg-suffix">&#176;</span>
       </span>
       <button id="btnCrop" disabled>Crop</button>
@@ -677,7 +677,7 @@ var state = {
   tex: null,
   texW: 0,
   texH: 0,
-  rot: 0,              // 0..3, quarter turns clockwise
+  angleDeg: 0,         // free rotation in degrees, clockwise on screen
   zoom: 1,             // 1 = fit, >1 zoomed in
   pan: [0, 0],         // clip-space offset, applied after zoom
   crop: { x: 0, y: 0, w: 1, h: 1 }, // displayed-normalized crop window
@@ -713,7 +713,7 @@ var SLIDER_GROUPS = [
   { group: 'Effects', items: [
     { id: 'gamma',    label: 'Gamma',    min: 0.3, max: 2.5, step: 0.01, def: 1 },
     { id: 'vignette', label: 'Vignette', min: -1,  max: 1,   step: 0.01, def: 0 },
-    { id: 'grain',     label: 'Grain',      min: 0,   max: 1,   step: 0.01, def: 0 },
+    { id: 'grain',     label: 'Grain',      min: 0,   max: 0.2, step: 0.005, def: 0 },
     { id: 'grainSize', label: 'Grain size', min: 1,   max: 8,   step: 0.1,  def: 2.5,
       fmt: function (v) { return v.toFixed(1) + ' px'; } }
   ]}
@@ -731,7 +731,8 @@ var VERT_SRC = [
   '#version 300 es',
   'layout(location = 0) in vec2 a_pos;',
   'uniform float u_rot;',
-  'uniform vec2 u_scale;',
+  'uniform vec2 u_imgHalf;', // image half-extents (aspect, 1) - applied BEFORE rotation
+  'uniform vec2 u_scale;',   // fit/letterbox scale (incl viewport aspect + flipY)
   'uniform float u_zoom;',
   'uniform vec2 u_pan;',
   'uniform vec2 u_cropOrigin;',  // texture-space crop window
@@ -743,7 +744,7 @@ var VERT_SRC = [
   '  v_uv = u_cropOrigin + v_local * u_cropSize;',
   '  float c = cos(u_rot);',
   '  float s = sin(u_rot);',
-  '  vec2 p = mat2(c, s, -s, c) * a_pos;',
+  '  vec2 p = mat2(c, s, -s, c) * (a_pos * u_imgHalf);',
   '  gl_Position = vec4(p * u_scale * u_zoom + u_pan, 0.0, 1.0);',
   '}'
 ].join('\n');
@@ -927,6 +928,7 @@ function initGL() {
   gl.useProgram(prog);
   uni.rot = gl.getUniformLocation(prog, 'u_rot');
   uni.scale = gl.getUniformLocation(prog, 'u_scale');
+  uni.imgHalf = gl.getUniformLocation(prog, 'u_imgHalf');
   uni.zoom = gl.getUniformLocation(prog, 'u_zoom');
   uni.pan = gl.getUniformLocation(prog, 'u_pan');
   uni.cropOrigin = gl.getUniformLocation(prog, 'u_cropOrigin');
@@ -1024,7 +1026,19 @@ function dispCropToTex(crop, rot) {
   return { x: x, y: y, w: w, h: h };
 }
 
-function drawQuad(vpW, vpH, rot, flipY, letterbox, zoom, pan, crop) {
+// Nearest quarter-turn (0..3) for the current display angle - used only for the
+// orthogonal-only crop/aspect mapping.
+function rotQuarter() {
+  return (((Math.round(state.angleDeg / 90) % 4) + 4) % 4);
+}
+// True when the display angle is (close to) a multiple of 90 - crop is only
+// meaningful there because the crop rect maps axis-aligned to the texture.
+function isOrthogonal() {
+  var m = ((state.angleDeg % 90) + 90) % 90;
+  return m < 0.01 || m > 89.99;
+}
+
+function drawQuad(vpW, vpH, angleDeg, flipY, letterbox, zoom, pan, crop) {
   crop = crop || { x: 0, y: 0, w: 1, h: 1 };
   gl.useProgram(prog);
   gl.activeTexture(gl.TEXTURE0);
@@ -1043,23 +1057,28 @@ function drawQuad(vpW, vpH, rot, flipY, letterbox, zoom, pan, crop) {
     gl.uniform1f(uni.lut[s].size, lut ? lut.size : 1);
     gl.uniform1f(uni.lut[s].inten, state.lutIntensity[s]);
   }
-  gl.uniform1f(uni.rot, -rot * Math.PI / 2); // negative = clockwise on screen
-  var tc = dispCropToTex(crop, rot);
+  var angleRad = -angleDeg * Math.PI / 180; // negative = clockwise on screen
+  var rotQ = (((Math.round(angleDeg / 90) % 4) + 4) % 4);
+  // Crop maps axis-aligned to the texture only at orthogonal angles; dispCropToTex
+  // with a full crop returns full for any rotQ, so this is safe when tilted.
+  var tc = dispCropToTex(crop, rotQ);
+  gl.uniform1f(uni.rot, angleRad);
   gl.uniform2f(uni.cropOrigin, tc.x, tc.y);
   gl.uniform2f(uni.cropSize, tc.w, tc.h);
-  var sx = 1, sy = 1;
-  if (letterbox) {
-    var rotated = rot % 2 === 1;
-    var fullW = rotated ? state.texH : state.texW;
-    var fullH = rotated ? state.texW : state.texH;
-    var iw = fullW * crop.w;
-    var ih = fullH * crop.h;
-    var imgAspect = iw / ih;
-    var vpAspect = vpW / vpH;
-    if (imgAspect > vpAspect) sy = vpAspect / imgAspect;
-    else sx = imgAspect / vpAspect;
-  }
-  gl.uniform2f(uni.scale, sx, sy * flipY);
+  // Image rectangle (pre-rotation) half-extents = (aspect, 1); rotation then the
+  // fit scale below map its bounding box into the viewport (letterbox = contain,
+  // otherwise cover). This keeps the image undistorted at any angle.
+  var A = (state.texW * tc.w) / (state.texH * tc.h);
+  var ca = Math.abs(Math.cos(angleRad));
+  var sa = Math.abs(Math.sin(angleRad));
+  var bboxHX = A * ca + sa;
+  var bboxHY = A * sa + ca;
+  var vpAspect = vpW / vpH;
+  var k = letterbox
+    ? Math.min(vpAspect / bboxHX, 1 / bboxHY)
+    : Math.max(vpAspect / bboxHX, 1 / bboxHY);
+  gl.uniform2f(uni.imgHalf, A, 1);
+  gl.uniform2f(uni.scale, k / vpAspect, k * flipY);
   gl.uniform1f(uni.zoom, zoom || 1);
   gl.uniform2f(uni.pan, pan ? pan[0] : 0, pan ? pan[1] : 0);
   gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
@@ -1100,7 +1119,7 @@ function render() {
   var activeCrop = state.cropping ? FULL_CROP : state.crop;
   var z = state.cropping ? 1 : state.zoom;
   var p = state.cropping ? [0, 0] : state.pan;
-  drawQuad(canvas.width, canvas.height, state.rot, 1, true, z, p, activeCrop);
+  drawQuad(canvas.width, canvas.height, state.angleDeg, 1, true, z, p, activeCrop);
   updateZoomChip();
   updateCropBox();
   scheduleHistogram();
@@ -1232,7 +1251,8 @@ function setControlsEnabled(on) {
   document.getElementById('btnReset').disabled = !on;
   document.getElementById('btnExport').disabled = !on;
   document.getElementById('chkFullRes').disabled = !on;
-  updateRotField(); // controls enable right after a fresh load (rotation reset to 0)
+  updateRotField();           // controls enable right after a fresh load (angle reset to 0)
+  if (on) updateCropAvail();  // refine the Crop button by orthogonality
 }
 
 /* Slider construction */
@@ -1343,6 +1363,14 @@ function resetAllSliders() {
     state.params[id] = s.def;
     s.refresh();
   });
+  // Reset all also clears rotation, crop, zoom and pan.
+  state.angleDeg = 0;
+  state.zoom = 1;
+  state.pan = [0, 0];
+  state.crop = { x: 0, y: 0, w: 1, h: 1 };
+  if (state.cropping) exitCropMode(false);
+  updateRotField();
+  updateCropAvail();
   requestRender();
 }
 
@@ -1632,7 +1660,7 @@ async function loadRasterImage(file) {
     }
     state.rawBytes = null; // raster images cannot be re-decoded at full res
     state.baseName = file.name.replace(/\.[^.]+$/, '') || 'export';
-    state.rot = 0;
+    state.angleDeg = 0;
     state.zoom = 1;
     state.pan = [0, 0];
     state.crop = { x: 0, y: 0, w: 1, h: 1 };
@@ -1680,7 +1708,7 @@ async function loadFile(file) {
   }
   state.rawBytes = bytes;
   state.baseName = file.name.replace(/\.[^.]+$/, '') || 'export';
-  state.rot = 0;
+  state.angleDeg = 0;
   state.zoom = 1;
   state.pan = [0, 0];
   state.crop = { x: 0, y: 0, w: 1, h: 1 };
@@ -1778,7 +1806,7 @@ async function loadEmbeddedThumb(thumbBytes) {
       data[o++] = 1;
     }
     state.rawBytes = null; // undecodable raw - do not offer re-decode
-    state.rot = 0; state.zoom = 1; state.pan = [0, 0];
+    state.angleDeg = 0; state.zoom = 1; state.pan = [0, 0];
     state.crop = { x: 0, y: 0, w: 1, h: 1 };
     if (state.cropping) exitCropMode(false);
     uploadTexture({ data: data, width: cw, height: ch });
@@ -1801,11 +1829,15 @@ async function loadEmbeddedThumb(thumbBytes) {
  * ============================================================ */
 function exportJPEG() {
   if (!gl || !state.tex) return;
-  var rotated = state.rot % 2 === 1;
-  var fullW = rotated ? state.texH : state.texW;
-  var fullH = rotated ? state.texW : state.texH;
-  var w = Math.max(1, Math.round(fullW * state.crop.w));
-  var h = Math.max(1, Math.round(fullH * state.crop.h));
+  // Output = the rotated bounding box of the (cropped) image at native pixels.
+  // For orthogonal angles this equals the swapped crop dims; for a free angle
+  // the tilted corners fall outside the image and are filled black below.
+  var tc = dispCropToTex(state.crop, rotQuarter());
+  var winW = state.texW * tc.w, winH = state.texH * tc.h;
+  var ar = -state.angleDeg * Math.PI / 180;
+  var ca = Math.abs(Math.cos(ar)), sa = Math.abs(Math.sin(ar));
+  var w = Math.max(1, Math.round(winW * ca + winH * sa));
+  var h = Math.max(1, Math.round(winW * sa + winH * ca));
 
   var tex = gl.createTexture();
   gl.bindTexture(gl.TEXTURE_2D, tex);
@@ -1823,7 +1855,10 @@ function exportJPEG() {
     return;
   }
   gl.viewport(0, 0, w, h);
-  drawQuad(w, h, state.rot, -1, false, 1, [0, 0], state.crop); // flipY for readPixels row order
+  gl.clearColor(0, 0, 0, 1); // fills the tilted corners at free angles
+  gl.clear(gl.COLOR_BUFFER_BIT);
+  // letterbox=true so the rotated image is contained within the bbox FBO
+  drawQuad(w, h, state.angleDeg, -1, true, 1, [0, 0], state.crop); // flipY for readPixels row order
   var px = new Uint8Array(w * h * 4);
   gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, px);
   gl.bindFramebuffer(gl.FRAMEBUFFER, null);
@@ -1947,31 +1982,44 @@ fileInput.addEventListener('change', function () {
 document.getElementById('btnOpen').addEventListener('click', function () { fileInput.click(); });
 document.getElementById('btnOpen2').addEventListener('click', function () { fileInput.click(); });
 
-// Reflect state.rot (0..3 quarter-turns) into the degree field.
+// Reflect the display angle into the degree field (normalized 0..359).
 function updateRotField() {
   var f = document.getElementById('rotDeg');
-  if (f) f.value = (((state.rot % 4) + 4) % 4) * 90;
+  if (!f) return;
+  var d = ((state.angleDeg % 360) + 360) % 360;
+  // Show a whole number when it is one, otherwise one decimal.
+  f.value = (Math.abs(d - Math.round(d)) < 0.05) ? Math.round(d) : d.toFixed(1);
 }
-// Rotate to a given number of quarter-turns (any integer, wrapped 0..3).
-// Zoom/pan and the displayed-space crop do not survive a rotation intuitively,
-// so reset them to keep the mapping unambiguous.
-function setRotation(quarterTurns) {
-  state.rot = (((quarterTurns % 4) + 4) % 4);
+// Crop only maps cleanly at orthogonal angles; enable/disable it accordingly.
+function updateCropAvail() {
+  var b = document.getElementById('btnCrop');
+  if (!b) return;
+  var ok = !!state.tex && isOrthogonal();
+  b.disabled = !ok;
+  b.title = (state.tex && !isOrthogonal())
+    ? 'Crop is available at 0 / 90 / 180 / 270 degrees'
+    : '';
+}
+// Set the free display angle (degrees, any value). Zoom/pan and the crop do not
+// survive a rotation intuitively, so reset them to keep the mapping unambiguous.
+function setAngle(deg) {
+  state.angleDeg = ((deg % 360) + 360) % 360;
   state.zoom = 1;
   state.pan = [0, 0];
   state.crop = { x: 0, y: 0, w: 1, h: 1 };
+  if (state.cropping) exitCropMode(false);
   updateRotField();
+  updateCropAvail();
   requestRender();
 }
-document.getElementById('btnRotateCW').addEventListener('click', function () { setRotation(state.rot + 1); });
-document.getElementById('btnRotateCCW').addEventListener('click', function () { setRotation(state.rot - 1); });
+document.getElementById('btnRotateCW').addEventListener('click', function () { setAngle(state.angleDeg + 90); });
+document.getElementById('btnRotateCCW').addEventListener('click', function () { setAngle(state.angleDeg - 90); });
 var rotDeg = document.getElementById('rotDeg');
-// The render engine only rotates in 90-degree steps, so a typed angle snaps
-// to the nearest quarter-turn.
+// Free rotation: apply the typed angle verbatim (no snapping).
 function applyRotFromField() {
   var deg = parseFloat(rotDeg.value);
   if (isNaN(deg)) { updateRotField(); return; }
-  setRotation(Math.round(deg / 90));
+  setAngle(deg);
 }
 rotDeg.addEventListener('change', applyRotFromField);
 rotDeg.addEventListener('keydown', function (e) {
@@ -2143,7 +2191,7 @@ var cropBackup = null;
 /* On-screen rect (px, within canvaswrap) of the full image at fit, zoom 1 */
 function fullImageScreenRect() {
   var W = canvasWrap.clientWidth, H = canvasWrap.clientHeight;
-  var rotated = state.rot % 2 === 1;
+  var rotated = rotQuarter() % 2 === 1;
   var aspect = (rotated ? state.texH : state.texW) / (rotated ? state.texW : state.texH);
   var canvasAspect = W / H;
   var iw, ih;
@@ -2165,7 +2213,7 @@ function updateCropBox() {
 
 /* Displayed image aspect (width/height), accounting for 90 deg rotation */
 function dispAspect() {
-  var rotated = state.rot % 2 === 1;
+  var rotated = rotQuarter() % 2 === 1;
   return (rotated ? state.texH : state.texW) / (rotated ? state.texW : state.texH);
 }
 

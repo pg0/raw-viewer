@@ -228,6 +228,8 @@
   .overlay-top { cursor: pointer; }
   .overlay-drag { cursor: grab; color: #777; font-size: 14px; padding: 0 4px; flex: 0 0 auto; user-select: none; }
   .overlay-drag:active { cursor: grabbing; }
+  .ov-applyfx { display: flex; align-items: center; gap: 6px; font-size: 11px; color: #b0b0b0; margin-bottom: 8px; cursor: pointer; user-select: none; }
+  .ov-applyfx input { margin: 0; cursor: pointer; }
   #emojipalette { display: flex; flex-wrap: wrap; gap: 3px; margin-top: 6px; }
   #emojipalette[hidden] { display: none; }
   #emojipalette button { font-size: 18px; line-height: 1; padding: 5px; min-width: 34px; background: #262626; border: 1px solid #383838; border-radius: 5px; cursor: pointer; }
@@ -618,6 +620,7 @@
     <details class="panel" open id="overlaypanel">
       <summary>Overlays</summary>
       <p class="hint">Blend grain, film strip, light leaks and more over the photo. Overlays track crop/rotation and are baked into the export.</p>
+      <label class="ov-applyfx"><input type="checkbox" id="ovApplyFx"> Apply effects (LUT, grain, grade) to overlays too</label>
       <div id="overlaylist"></div>
       <div class="btnrow">
         <button id="btnAddOverlay" disabled>+ Image</button>
@@ -880,7 +883,8 @@ var state = {
   params: {},
   luts: [null, null],       // slot 0 = converter, slot 1 = style; each { name, size, is3D, tex }
   lutIntensity: [1, 1],
-  overlays: []              // [{ name, tex, w, h, mode, opacity, tile }] composited over the photo
+  overlays: [],             // [{ name, tex, w, h, mode, opacity, tile }] composited over the photo
+  applyFx: false            // grade (LUT/grain/etc.) the overlays together with the photo
 };
 
 var LUT_UNITS = null; // filled in initGL: per-slot texture unit numbers + dummy textures
@@ -950,6 +954,7 @@ var FRAG_SRC = [
   'uniform float u_exposure, u_contrast, u_highlights, u_shadows, u_whites, u_blacks;',
   'uniform float u_temperature, u_tint, u_vibrance, u_saturation, u_gamma, u_vignette;',
   'uniform float u_grain, u_grainSize;',
+  'uniform int u_fromSrgb;', // 1 = input is an sRGB scene buffer (post pass); re-linearize before grading
   // Two LUT slots: 0 = converter, 1 = style. Each can be 3D or 1D.
   'uniform mediump sampler3D u_lut0_3d;',
   'uniform sampler2D u_lut0_1d;',
@@ -1017,8 +1022,18 @@ var FRAG_SRC = [
   '  return mix(lo, hi, step(vec3(0.0031308), c));',
   '}',
   '',
+  'vec3 srgbToLin(vec3 c) {',
+  '  c = clamp(c, 0.0, 1.0);',
+  '  vec3 lo = c / 12.92;',
+  '  vec3 hi = pow((c + 0.055) / 1.055, vec3(2.4));',
+  '  return mix(lo, hi, step(vec3(0.04045), c));',
+  '}',
+  '',
   'void main() {',
   '  vec3 rgb = texture(u_image, v_uv).rgb;',
+  // Post pass over the composited scene: the buffer holds sRGB display values,
+  // so recover linear light before the grade re-runs (base+overlays graded together).
+  '  if (u_fromSrgb == 1) { rgb = srgbToLin(rgb); }',
   '',
   '  // 1. White balance trim in linear light',
   '  rgb.r *= exp2(u_temperature * 0.6);',
@@ -1197,6 +1212,7 @@ function initGL() {
   uni.cropOrigin = gl.getUniformLocation(prog, 'u_cropOrigin');
   uni.cropSize = gl.getUniformLocation(prog, 'u_cropSize');
   uni.image = gl.getUniformLocation(prog, 'u_image');
+  uni.fromSrgb = gl.getUniformLocation(prog, 'u_fromSrgb');
   uni.lut = [
     {
       s3d: gl.getUniformLocation(prog, 'u_lut0_3d'),
@@ -1342,19 +1358,23 @@ function isOrthogonal() {
   return m < 0.01 || m > 89.99;
 }
 
-function drawQuad(vpW, vpH, angleDeg, flipY, letterbox, zoom, pan, crop) {
+function drawQuad(vpW, vpH, angleDeg, flipY, letterbox, zoom, pan, crop, effects) {
   crop = crop || { x: 0, y: 0, w: 1, h: 1 };
+  if (effects === undefined) effects = true;
   gl.useProgram(prog);
   gl.activeTexture(gl.TEXTURE0);
   gl.bindTexture(gl.TEXTURE_2D, state.tex);
+  gl.uniform1i(uni.fromSrgb, 0); // base pass reads the linear photo; no re-linearize
   for (var i = 0; i < PARAM_IDS.length; i++) {
     var pid = PARAM_IDS[i];
+    // effects=false renders the ungraded base (only linear->sRGB) into the scene
+    // buffer, so the post pass can grade base+overlays together.
     // A bypassed group (eye toggled off) renders its params at their defaults.
     var grp = PARAM_GROUP[pid];
-    var pv = (grp && !groupEnabled[grp]) ? PARAM_DEF[pid] : state.params[pid];
+    var pv = (!effects || (grp && !groupEnabled[grp])) ? PARAM_DEF[pid] : state.params[pid];
     gl.uniform1f(uni[pid], pv);
   }
-  var lutOn = groupEnabled.LUT;
+  var lutOn = effects && groupEnabled.LUT;
   for (var s = 0; s < 2; s++) {
     var lut = state.luts[s];
     gl.uniform1i(uni.lut[s].mode, (lutOn && lut) ? (lut.is3D ? 1 : 2) : 0);
@@ -1507,6 +1527,64 @@ function resizeCanvas() {
 
 var FULL_CROP = { x: 0, y: 0, w: 1, h: 1 };
 
+/* ---- "Apply effects to overlays": composite base + overlays into a scene
+ * buffer (sRGB), then run the full grade over the whole thing as a post pass,
+ * so LUT / grain / exposure / etc. also land on the overlays. Only used when
+ * the toggle is on; the default path stays a direct base+overlays screen draw. */
+var sceneFB = null, sceneTex = null, sceneW = 0, sceneH = 0;
+function ensureSceneFB(w, h) {
+  if (sceneFB && sceneW === w && sceneH === h) return;
+  if (sceneTex) gl.deleteTexture(sceneTex);
+  if (sceneFB) gl.deleteFramebuffer(sceneFB);
+  sceneTex = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, sceneTex);
+  // RGBA8 (not float): universally color-renderable AND blendable, so overlay
+  // compositing works everywhere (float-blend needs EXT_float_blend).
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  sceneFB = gl.createFramebuffer();
+  gl.bindFramebuffer(gl.FRAMEBUFFER, sceneFB);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, sceneTex, 0);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  sceneW = w; sceneH = h;
+}
+
+/* Grade the scene buffer onto the bound target as a full-frame 1:1 blit.
+ * scenePassFlipY = the flipY the scene was rendered with (1 screen, -1 export);
+ * the sampling geometry is inverted to undo the render flip. */
+function drawEffectsPost(vpW, vpH, scenePassFlipY, srcTex) {
+  gl.useProgram(prog);
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D, srcTex);
+  gl.uniform1i(uni.fromSrgb, 1); // scene holds sRGB; re-linearize before grading
+  for (var i = 0; i < PARAM_IDS.length; i++) {
+    var pid = PARAM_IDS[i];
+    var grp = PARAM_GROUP[pid];
+    var pv = (grp && !groupEnabled[grp]) ? PARAM_DEF[pid] : state.params[pid];
+    gl.uniform1f(uni[pid], pv);
+  }
+  var lutOn = groupEnabled.LUT;
+  for (var s = 0; s < 2; s++) {
+    var lut = state.luts[s];
+    gl.uniform1i(uni.lut[s].mode, (lutOn && lut) ? (lut.is3D ? 1 : 2) : 0);
+    gl.uniform1f(uni.lut[s].size, lut ? lut.size : 1);
+    gl.uniform1f(uni.lut[s].inten, state.lutIntensity[s]);
+  }
+  var vpAspect = vpW / vpH;
+  gl.uniform1f(uni.rot, 0);
+  gl.uniform2f(uni.cropOrigin, 0, 0);
+  gl.uniform2f(uni.cropSize, 1, 1);
+  gl.uniform2f(uni.imgHalf, vpAspect, 1);
+  gl.uniform2f(uni.scale, 1 / vpAspect, -scenePassFlipY);
+  gl.uniform1f(uni.zoom, 1);
+  gl.uniform2f(uni.pan, 0, 0);
+  gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+  gl.uniform1i(uni.fromSrgb, 0); // restore for subsequent base passes
+}
+
 /* Render on demand - no rAF loop */
 var renderQueued = false;
 function requestRender() {
@@ -1521,17 +1599,34 @@ function requestRender() {
 function render() {
   if (!gl || !state.tex) return;
   resizeCanvas();
-  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-  gl.viewport(0, 0, canvas.width, canvas.height);
-  gl.clearColor(0.118, 0.118, 0.118, 1);
-  gl.clear(gl.COLOR_BUFFER_BIT);
   // While the crop tool is active, show the whole image at fit (the crop
   // rectangle is an HTML overlay); otherwise render the committed crop.
   var activeCrop = state.cropping ? FULL_CROP : state.crop;
   var z = state.cropping ? 1 : state.zoom;
   var p = state.cropping ? [0, 0] : state.pan;
-  drawQuad(canvas.width, canvas.height, state.angleDeg, 1, true, z, p, activeCrop);
-  drawOverlays(canvas.width, canvas.height, state.angleDeg, 1, z, p, activeCrop);
+  var useFx = state.applyFx && state.overlays.length && !state.cropping;
+  if (useFx) {
+    // 1. ungraded base + overlays into the scene buffer, 2. grade the composite.
+    ensureSceneFB(canvas.width, canvas.height);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, sceneFB);
+    gl.viewport(0, 0, canvas.width, canvas.height);
+    gl.clearColor(0.118, 0.118, 0.118, 1);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+    drawQuad(canvas.width, canvas.height, state.angleDeg, 1, true, z, p, activeCrop, false);
+    drawOverlays(canvas.width, canvas.height, state.angleDeg, 1, z, p, activeCrop);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.viewport(0, 0, canvas.width, canvas.height);
+    gl.clearColor(0.118, 0.118, 0.118, 1);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+    drawEffectsPost(canvas.width, canvas.height, 1, sceneTex);
+  } else {
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.viewport(0, 0, canvas.width, canvas.height);
+    gl.clearColor(0.118, 0.118, 0.118, 1);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+    drawQuad(canvas.width, canvas.height, state.angleDeg, 1, true, z, p, activeCrop);
+    drawOverlays(canvas.width, canvas.height, state.angleDeg, 1, z, p, activeCrop);
+  }
   updateZoomChip();
   updateCropBox();
   updateGizmo();
@@ -2311,8 +2406,34 @@ function exportJPEG() {
   gl.clearColor(0, 0, 0, 1); // fills the tilted corners at free angles
   gl.clear(gl.COLOR_BUFFER_BIT);
   // letterbox=true so the rotated image is contained within the bbox FBO
-  drawQuad(w, h, state.angleDeg, -1, true, 1, [0, 0], state.crop); // flipY for readPixels row order
-  drawOverlays(w, h, state.angleDeg, -1, 1, [0, 0], state.crop);   // bake overlays into the export
+  if (state.applyFx && state.overlays.length) {
+    // Mirror the screen path: ungraded base + overlays -> scene, then grade.
+    var scTex = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, scTex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    var scFB = gl.createFramebuffer();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, scFB);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, scTex, 0);
+    gl.viewport(0, 0, w, h);
+    gl.clearColor(0, 0, 0, 1);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+    drawQuad(w, h, state.angleDeg, -1, true, 1, [0, 0], state.crop, false);
+    drawOverlays(w, h, state.angleDeg, -1, 1, [0, 0], state.crop);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo); // back to the RGBA8 export target
+    gl.viewport(0, 0, w, h);
+    gl.clearColor(0, 0, 0, 1);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+    drawEffectsPost(w, h, -1, scTex);
+    gl.deleteFramebuffer(scFB);
+    gl.deleteTexture(scTex);
+  } else {
+    drawQuad(w, h, state.angleDeg, -1, true, 1, [0, 0], state.crop); // flipY for readPixels row order
+    drawOverlays(w, h, state.angleDeg, -1, 1, [0, 0], state.crop);   // bake overlays into the export
+  }
   var px = new Uint8Array(w * h * 4);
   gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, px);
   gl.bindFramebuffer(gl.FRAMEBUFFER, null);
@@ -2960,6 +3081,10 @@ overlayInput.addEventListener('change', function () {
   overlayInput.value = '';
 });
 document.getElementById('btnAddText').addEventListener('click', addTextOverlay);
+document.getElementById('ovApplyFx').addEventListener('change', function () {
+  state.applyFx = this.checked;
+  requestRender();
+});
 document.getElementById('btnAddEmoji').addEventListener('click', function () {
   buildEmojiPalette();
   var pal = document.getElementById('emojipalette');
@@ -3119,6 +3244,19 @@ canvasWrap.addEventListener('wheel', function (e) {
  * pinch-zoom around their midpoint. Works for mouse and touch. */
 var activePointers = new Map();
 var pinch = null;
+var tapInfo = null;   // tracks a single tap for deselect-on-tap-outside
+
+/* Is a screen point (px within canvaswrap) inside the sticker's quad? */
+function pointInStickerScreen(ov, sx, sy) {
+  var g = stickerScreenGeom(ov);
+  if (!g) return false;
+  var c = g.corners, inside = false;
+  for (var i = 0, j = c.length - 1; i < c.length; j = i++) {
+    var xi = c[i].x, yi = c[i].y, xj = c[j].x, yj = c[j].y;
+    if (((yi > sy) !== (yj > sy)) && (sx < (xj - xi) * (sy - yi) / (yj - yi) + xi)) inside = !inside;
+  }
+  return inside;
+}
 
 function twoPointers() {
   var it = activePointers.values();
@@ -3139,6 +3277,8 @@ canvasWrap.addEventListener('pointerdown', function (e) {
   if (e.pointerType === 'mouse' && e.button !== 0) return;
   activePointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
   canvasWrap.setPointerCapture(e.pointerId);
+  if (activePointers.size === 1) tapInfo = { x: e.clientX, y: e.clientY, moved: false };
+  else tapInfo = null;
   if (activePointers.size >= 2) {
     startPinch();
     canvasWrap.classList.remove('panning');
@@ -3286,6 +3426,8 @@ canvasWrap.addEventListener('pointermove', function (e) {
   activePointers.set(e.pointerId, cur);
   var rect = canvasWrap.getBoundingClientRect();
 
+  if (tapInfo && (Math.abs(cur.x - tapInfo.x) > 4 || Math.abs(cur.y - tapInfo.y) > 4)) tapInfo.moved = true;
+
   if (activePointers.size >= 2 && pinch) {
     var p = twoPointers();
     var dx = p[0].x - p[1].x, dy = p[0].y - p[1].y;
@@ -3329,8 +3471,21 @@ function releasePointer(e) {
   if (activePointers.size < 2) pinch = null;
   if (activePointers.size === 1 && (overlaySelected() || state.zoom > 1)) canvasWrap.classList.add('panning');
   else canvasWrap.classList.remove('panning');
-  // Refresh the offset sliders to match a finished drag.
-  if (activePointers.size === 0 && wasMovingOverlay) renderOverlayList();
+  if (activePointers.size === 0) {
+    // A tap (no drag) outside the selected sticker deselects it.
+    var ov = state.selectedOverlay != null ? state.overlays[state.selectedOverlay] : null;
+    if (tapInfo && !tapInfo.moved && ov && isSticker(ov)) {
+      var rect = canvasWrap.getBoundingClientRect();
+      if (!pointInStickerScreen(ov, e.clientX - rect.left, e.clientY - rect.top)) {
+        state.selectedOverlay = null;
+        renderOverlayList();
+        requestRender();
+      }
+    } else if (wasMovingOverlay) {
+      renderOverlayList(); // refresh sliders after a finished drag
+    }
+    tapInfo = null;
+  }
 }
 canvasWrap.addEventListener('pointerup', releasePointer);
 canvasWrap.addEventListener('pointercancel', releasePointer);

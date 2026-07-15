@@ -21,8 +21,23 @@
     background: #161616;
     color: #d4d4d4;
     overflow: hidden;
+    display: flex;
+    flex-direction: column;
   }
-  #app { display: flex; height: 100vh; }
+  /* Always-visible top bar: title + Open / Save */
+  #topbar {
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 12px;
+    background: #1c1c1c;
+    border-bottom: 1px solid #2e2e2e;
+  }
+  #apptitle { font-size: 13px; font-weight: 600; color: #cfcfcf; margin-right: auto; white-space: nowrap; }
+  #topbar .topbar-actions { display: flex; gap: 8px; }
+  #topbar button { padding: 7px 14px; }
+  #app { display: flex; flex: 1 1 auto; min-height: 0; }
 
   /* Viewer area */
   #viewer {
@@ -167,6 +182,15 @@
   }
   #sidebar::-webkit-scrollbar { width: 8px; }
   #sidebar::-webkit-scrollbar-thumb { background: #3a3a3a; border-radius: 4px; }
+  .overlay-item { border: 1px solid #303030; border-radius: 6px; padding: 8px; margin-bottom: 8px; background: #202020; }
+  .overlay-top { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; }
+  .overlay-thumb { width: 28px; height: 28px; object-fit: cover; border-radius: 3px; background: #111; flex: 0 0 auto; }
+  .overlay-name { flex: 1; font-size: 11px; color: #ccc; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .overlay-remove { background: none; border: none; color: #a05a5a; font-size: 15px; padding: 0 4px; line-height: 1; }
+  .overlay-remove:hover:not(:disabled) { background: none; color: #d06a6a; }
+  .overlay-ctrls { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+  .overlay-ctrls select { flex: 1; background: #333; color: #ddd; border: 1px solid #444; border-radius: 5px; padding: 4px 6px; font-size: 11px; font-family: inherit; }
+  .overlay-tile { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; color: #bbb; white-space: nowrap; }
   .credit { margin-top: auto; padding-top: 8px; font-size: 11px; color: #666; text-align: center; line-height: 1.6; }
   .credit a { color: #7aa7d0; text-decoration: none; }
   .credit a:hover { text-decoration: underline; }
@@ -304,6 +328,7 @@
   .lutslot:last-of-type { margin-bottom: 0; }
   .lutslot-title { font-size: 11.5px; color: #b5b5b5; margin-bottom: 5px; }
   .luthint { font-size: 10.5px; color: #6f6f6f; margin-top: 8px; line-height: 1.4; }
+  .hint { font-size: 10.5px; color: #6f6f6f; margin-bottom: 8px; line-height: 1.4; }
   .lutinfo {
     display: flex;
     align-items: center;
@@ -347,9 +372,38 @@
     z-index: 50;
   }
   #toast.visible { opacity: 1; }
+
+  /* Mobile / narrow: stack the photo on top (always visible), controls scroll
+     below. Open / Save stay in the sticky top bar. */
+  @media (max-width: 820px) {
+    #app { flex-direction: column; }
+    #viewer { flex: 0 0 46vh; min-height: 0; }
+    #sidebar {
+      width: 100%;
+      flex: 1 1 auto;
+      border-left: none;
+      border-top: 1px solid #2e2e2e;
+      -webkit-overflow-scrolling: touch;
+    }
+    #footer { display: none; }
+    #apptitle { font-size: 12px; }
+    #topbar button { padding: 8px 12px; }
+  }
+  @media (max-width: 420px) {
+    #apptitle { display: none; }
+    #topbar .topbar-actions { flex: 1; }
+    #topbar .topbar-actions button { flex: 1; }
+  }
 </style>
 </head>
 <body>
+<div id="topbar">
+  <span id="apptitle">RAW Viewer</span>
+  <div class="topbar-actions">
+    <button id="btnOpen" class="primary">Open image</button>
+    <button id="btnExport" class="primary" disabled>Save JPEG</button>
+  </div>
+</div>
 <div id="app">
   <main id="viewer">
     <div id="canvaswrap">
@@ -389,9 +443,6 @@
     </div>
   </main>
   <aside id="sidebar">
-    <div class="btnrow">
-      <button id="btnOpen" class="primary wide">Open file</button>
-    </div>
     <div class="btnrow toolrow">
       <button id="btnReset" disabled>Reset all</button>
       <button id="btnRotateCW" class="iconbtn" disabled title="Rotate 90&#176; clockwise" aria-label="Rotate 90 degrees clockwise"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg></button>
@@ -453,15 +504,21 @@
       </div>
       <div class="luthint">Drop a .cube onto the window to load it as LUT2.</div>
     </details>
+    <details class="panel" open id="overlaypanel">
+      <summary>Overlays</summary>
+      <p class="hint">Blend grain, film strip, light leaks and more over the photo. Overlays track crop/rotation and are baked into the export.</p>
+      <div id="overlaylist"></div>
+      <div class="btnrow">
+        <button id="btnAddOverlay" disabled>+ Add overlay image</button>
+      </div>
+    </details>
     <div class="panel">
       <h3>Export</h3>
       <div class="slider-row">
         <div class="slider-head"><span>Quality</span><span class="val" id="qualVal">95</span></div>
         <input type="range" id="quality" min="60" max="100" step="1" value="95">
       </div>
-      <div class="exportrow">
-        <button id="btnExport" class="primary" disabled>Export JPEG</button>
-      </div>
+      <p class="hint">Use "Save JPEG" in the top bar to export.</p>
     </div>
     <details class="panel" id="metapanel">
       <summary>Metadata</summary>
@@ -477,6 +534,7 @@
 <input type="file" id="fileinput" hidden
   accept=".arw,.cr2,.cr3,.nef,.nrw,.dng,.raf,.orf,.rw2,.raw,.pef,.srw,.srf,.sr2,.kdc,.dcr,.mrw,.3fr,.erf,.mef,.mos,.x3f,.gpr,.rwl,.iiq,.cap,.fff,.arq,.jpg,.jpeg,.png,.webp,.bmp,.gif,.heic,.heif">
 <input type="file" id="lutinput" hidden accept=".cube">
+<input type="file" id="overlayinput" hidden accept="image/*">
 
 <script src="dcraw.js"></script>
 <script src="libheif.js"></script>
@@ -689,7 +747,8 @@ var state = {
   decoding: false,
   params: {},
   luts: [null, null],       // slot 0 = converter, slot 1 = style; each { name, size, is3D, tex }
-  lutIntensity: [1, 1]
+  lutIntensity: [1, 1],
+  overlays: []              // [{ name, tex, w, h, mode, opacity, tile }] composited over the photo
 };
 
 var LUT_UNITS = null; // filled in initGL: per-slot texture unit numbers + dummy textures
@@ -905,6 +964,53 @@ var uni = {};
 var PARAM_IDS = ['exposure', 'contrast', 'highlights', 'shadows', 'whites', 'blacks',
                  'temperature', 'tint', 'vibrance', 'saturation', 'gamma', 'vignette', 'grain', 'grainSize'];
 
+/* Overlay compositing program. Draws an image-aligned quad (same transform as
+ * the base) over the rendered photo, blended per mode via GL blending. The base
+ * framebuffer already holds sRGB display values, so overlays composite in
+ * display space (like grain / film-strip layers in a photo editor). */
+var OVERLAY_VERT = [
+  '#version 300 es',
+  'layout(location = 0) in vec2 a_pos;',
+  'uniform float u_rot;',
+  'uniform vec2 u_imgHalf;',
+  'uniform vec2 u_scale;',
+  'uniform float u_zoom;',
+  'uniform vec2 u_pan;',
+  'uniform vec2 u_ovScale;', // overlay UV scale/tiling (1 = stretch to fit)
+  'out vec2 v_uv;',
+  'void main() {',
+  '  vec2 local = vec2(a_pos.x * 0.5 + 0.5, 0.5 - a_pos.y * 0.5);',
+  '  v_uv = (local - 0.5) * u_ovScale + 0.5;',
+  '  float c = cos(u_rot);',
+  '  float s = sin(u_rot);',
+  '  vec2 p = mat2(c, s, -s, c) * (a_pos * u_imgHalf);',
+  '  gl_Position = vec4(p * u_scale * u_zoom + u_pan, 0.0, 1.0);',
+  '}'
+].join('\n');
+var OVERLAY_FRAG = [
+  '#version 300 es',
+  'precision highp float;',
+  'uniform sampler2D u_ov;',
+  'uniform int u_mode;',      // 0 normal, 1 multiply, 2 screen, 3 add
+  'uniform float u_opacity;',
+  'uniform int u_tile;',      // 1 = repeat, 0 = clamp (transparent outside)
+  'in vec2 v_uv;',
+  'out vec4 frag;',
+  'void main() {',
+  '  vec2 uv = u_tile == 1 ? fract(v_uv) : v_uv;',
+  '  if (u_tile == 0 && (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0)) { discard; }',
+  '  vec4 t = texture(u_ov, uv);',
+  '  float a = t.a * u_opacity;',
+  // premultiply the output so fixed-function blending yields the right mode:
+  '  if (u_mode == 1) { frag = vec4(mix(vec3(1.0), t.rgb, a), 1.0); }',      // multiply: blend DST_COLOR, ZERO
+  '  else if (u_mode == 2) { frag = vec4(t.rgb * a, 1.0); }',                // screen: blend ONE, ONE_MINUS_SRC_COLOR
+  '  else if (u_mode == 3) { frag = vec4(t.rgb * a, 1.0); }',                // add: blend ONE, ONE
+  '  else { frag = vec4(t.rgb, a); }',                                       // normal: blend SRC_ALPHA, 1-SRC_ALPHA
+  '}'
+].join('\n');
+var ovProg = null;
+var ovUni = {};
+
 function compileShader(type, src) {
   var sh = gl.createShader(type);
   gl.shaderSource(sh, src);
@@ -981,6 +1087,31 @@ function initGL() {
     LUT_UNITS.push({ u3d: u3d, u1d: u1d, dummy3d: d3, dummy1d: d1 });
   }
   gl.activeTexture(gl.TEXTURE0);
+
+  // Overlay compositing program (shares the quad + attribute location 0).
+  var ovs = compileShader(gl.VERTEX_SHADER, OVERLAY_VERT);
+  var ofs = compileShader(gl.FRAGMENT_SHADER, OVERLAY_FRAG);
+  ovProg = gl.createProgram();
+  gl.attachShader(ovProg, ovs);
+  gl.attachShader(ovProg, ofs);
+  gl.linkProgram(ovProg);
+  if (!gl.getProgramParameter(ovProg, gl.LINK_STATUS)) {
+    throw new Error('Overlay program: ' + gl.getProgramInfoLog(ovProg));
+  }
+  ovUni = {
+    rot: gl.getUniformLocation(ovProg, 'u_rot'),
+    imgHalf: gl.getUniformLocation(ovProg, 'u_imgHalf'),
+    scale: gl.getUniformLocation(ovProg, 'u_scale'),
+    zoom: gl.getUniformLocation(ovProg, 'u_zoom'),
+    pan: gl.getUniformLocation(ovProg, 'u_pan'),
+    ovScale: gl.getUniformLocation(ovProg, 'u_ovScale'),
+    ov: gl.getUniformLocation(ovProg, 'u_ov'),
+    mode: gl.getUniformLocation(ovProg, 'u_mode'),
+    opacity: gl.getUniformLocation(ovProg, 'u_opacity'),
+    tile: gl.getUniformLocation(ovProg, 'u_tile')
+  };
+  gl.useProgram(ovProg);
+  gl.uniform1i(ovUni.ov, 0); // overlays sample from texture unit 0
 
   // Fullscreen quad
   var vao = gl.createVertexArray();
@@ -1084,6 +1215,55 @@ function drawQuad(vpW, vpH, angleDeg, flipY, letterbox, zoom, pan, crop) {
   gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
 }
 
+// Blend equation/func for each overlay mode (paired with the premultiplied
+// output the overlay fragment shader produces).
+function setOverlayBlend(mode) {
+  gl.blendEquation(gl.FUNC_ADD);
+  if (mode === 1)      gl.blendFunc(gl.DST_COLOR, gl.ZERO);            // multiply
+  else if (mode === 2) gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_COLOR);  // screen
+  else if (mode === 3) gl.blendFunc(gl.ONE, gl.ONE);                  // add
+  else                 gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA); // normal
+}
+
+// Composite the overlay stack over the just-rendered photo, aligned to the same
+// image quad (so overlays track rotation / zoom / pan / crop and are exported).
+function drawOverlays(vpW, vpH, angleDeg, flipY, zoom, pan, crop) {
+  if (!state.overlays.length) return;
+  crop = crop || { x: 0, y: 0, w: 1, h: 1 };
+  var angleRad = -angleDeg * Math.PI / 180;
+  var rotQ = (((Math.round(angleDeg / 90) % 4) + 4) % 4);
+  var tc = dispCropToTex(crop, rotQ);
+  var A = (state.texW * tc.w) / (state.texH * tc.h);
+  var ca = Math.abs(Math.cos(angleRad));
+  var sa = Math.abs(Math.sin(angleRad));
+  var bboxHX = A * ca + sa, bboxHY = A * sa + ca;
+  var vpAspect = vpW / vpH;
+  var k = Math.min(vpAspect / bboxHX, 1 / bboxHY); // contain (match base letterbox)
+  gl.useProgram(ovProg);
+  gl.activeTexture(gl.TEXTURE0);
+  gl.uniform1f(ovUni.rot, angleRad);
+  gl.uniform2f(ovUni.imgHalf, A, 1);
+  gl.uniform2f(ovUni.scale, k / vpAspect, k * flipY);
+  gl.uniform1f(ovUni.zoom, zoom || 1);
+  gl.uniform2f(ovUni.pan, pan ? pan[0] : 0, pan ? pan[1] : 0);
+  gl.uniform1i(ovUni.ov, 0);
+  gl.enable(gl.BLEND);
+  for (var i = 0; i < state.overlays.length; i++) {
+    var ov = state.overlays[i];
+    if (!ov.tex || ov.opacity <= 0) continue;
+    gl.bindTexture(gl.TEXTURE_2D, ov.tex);
+    gl.uniform1f(ovUni.opacity, ov.opacity);
+    gl.uniform1i(ovUni.mode, ov.mode | 0);
+    gl.uniform1i(ovUni.tile, ov.tile ? 1 : 0);
+    var sc = ov.tile ? (ov.scale || 1) : 1;
+    gl.uniform2f(ovUni.ovScale, sc, sc);
+    setOverlayBlend(ov.mode | 0);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+  }
+  gl.disable(gl.BLEND);
+  gl.bindTexture(gl.TEXTURE_2D, state.tex); // leave unit 0 on the image
+}
+
 function resizeCanvas() {
   var dpr = window.devicePixelRatio || 1;
   var w = Math.max(1, Math.round(canvas.clientWidth * dpr));
@@ -1120,6 +1300,7 @@ function render() {
   var z = state.cropping ? 1 : state.zoom;
   var p = state.cropping ? [0, 0] : state.pan;
   drawQuad(canvas.width, canvas.height, state.angleDeg, 1, true, z, p, activeCrop);
+  drawOverlays(canvas.width, canvas.height, state.angleDeg, 1, z, p, activeCrop);
   updateZoomChip();
   updateCropBox();
   scheduleHistogram();
@@ -1250,6 +1431,7 @@ function setControlsEnabled(on) {
   document.getElementById('btnCrop').disabled = !on;
   document.getElementById('btnReset').disabled = !on;
   document.getElementById('btnExport').disabled = !on;
+  document.getElementById('btnAddOverlay').disabled = !on;
   document.getElementById('chkFullRes').disabled = !on;
   updateRotField();           // controls enable right after a fresh load (angle reset to 0)
   if (on) updateCropAvail();  // refine the Crop button by orthogonality
@@ -1859,6 +2041,7 @@ function exportJPEG() {
   gl.clear(gl.COLOR_BUFFER_BIT);
   // letterbox=true so the rotated image is contained within the bbox FBO
   drawQuad(w, h, state.angleDeg, -1, true, 1, [0, 0], state.crop); // flipY for readPixels row order
+  drawOverlays(w, h, state.angleDeg, -1, 1, [0, 0], state.crop);   // bake overlays into the export
   var px = new Uint8Array(w * h * 4);
   gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, px);
   gl.bindFramebuffer(gl.FRAMEBUFFER, null);
@@ -2068,6 +2251,150 @@ lutInput.addEventListener('change', function () {
     intVal.textContent = '100 %';
     requestRender();
   });
+});
+
+/* ============================================================
+ * Overlays: blend extra images (grain, film strip, light leaks)
+ * over the photo. Composited GPU-side, aligned to the image quad.
+ * ============================================================ */
+var overlayInput = document.getElementById('overlayinput');
+var overlayList = document.getElementById('overlaylist');
+var OVERLAY_MODES = [
+  { v: 0, l: 'Normal' }, { v: 2, l: 'Screen' },
+  { v: 1, l: 'Multiply' }, { v: 3, l: 'Add' }
+];
+
+function uploadOverlayTexture(source) {
+  var tex = gl.createTexture();
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D, tex);
+  // Same Y convention as the base image (no flip); overlay top aligns with the
+  // image top. Kept as sRGB bytes so blending happens in display space.
+  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, source);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.REPEAT);
+  if (state.tex) gl.bindTexture(gl.TEXTURE_2D, state.tex);
+  return tex;
+}
+
+async function addOverlay(file) {
+  if (!gl) { toast('WebGL2 not available.'); return; }
+  var bmp;
+  try {
+    bmp = await createImageBitmap(file);
+  } catch (e) {
+    toast('Could not load overlay: ' + excerpt(e.message || e));
+    return;
+  }
+  var tex = uploadOverlayTexture(bmp);
+  // small thumbnail for the list
+  var ts = 40, r = Math.min(ts / bmp.width, ts / bmp.height, 1);
+  var tc = document.createElement('canvas');
+  tc.width = Math.max(1, Math.round(bmp.width * r));
+  tc.height = Math.max(1, Math.round(bmp.height * r));
+  tc.getContext('2d').drawImage(bmp, 0, 0, tc.width, tc.height);
+  var thumb = tc.toDataURL('image/png');
+  var w = bmp.width, h = bmp.height;
+  if (bmp.close) bmp.close();
+  state.overlays.push({
+    name: file.name, tex: tex, w: w, h: h,
+    mode: 2, opacity: 0.7, tile: false, scale: 1, thumb: thumb // Screen @ 70% default
+  });
+  renderOverlayList();
+  requestRender();
+}
+
+function removeOverlay(idx) {
+  var ov = state.overlays[idx];
+  if (!ov) return;
+  if (ov.tex) gl.deleteTexture(ov.tex);
+  state.overlays.splice(idx, 1);
+  renderOverlayList();
+  requestRender();
+}
+
+function renderOverlayList() {
+  overlayList.innerHTML = '';
+  state.overlays.forEach(function (ov, idx) {
+    var item = document.createElement('div');
+    item.className = 'overlay-item';
+
+    var top = document.createElement('div');
+    top.className = 'overlay-top';
+    var img = document.createElement('img');
+    img.className = 'overlay-thumb';
+    img.src = ov.thumb;
+    var name = document.createElement('span');
+    name.className = 'overlay-name';
+    name.textContent = ov.name;
+    name.title = ov.name;
+    var rm = document.createElement('button');
+    rm.className = 'overlay-remove';
+    rm.textContent = '×';
+    rm.title = 'Remove overlay';
+    rm.addEventListener('click', function () { removeOverlay(idx); });
+    top.appendChild(img); top.appendChild(name); top.appendChild(rm);
+
+    var ctrls = document.createElement('div');
+    ctrls.className = 'overlay-ctrls';
+    var sel = document.createElement('select');
+    OVERLAY_MODES.forEach(function (m) {
+      var o = document.createElement('option');
+      o.value = m.v; o.textContent = m.l;
+      if (m.v === ov.mode) o.selected = true;
+      sel.appendChild(o);
+    });
+    sel.addEventListener('change', function () { ov.mode = parseInt(sel.value, 10); requestRender(); });
+    var tileLbl = document.createElement('label');
+    tileLbl.className = 'overlay-tile';
+    var tileChk = document.createElement('input');
+    tileChk.type = 'checkbox'; tileChk.checked = !!ov.tile;
+    tileChk.addEventListener('change', function () {
+      ov.tile = tileChk.checked; sizeRow.style.display = ov.tile ? '' : 'none'; requestRender();
+    });
+    tileLbl.appendChild(tileChk); tileLbl.appendChild(document.createTextNode(' Tile'));
+    ctrls.appendChild(sel); ctrls.appendChild(tileLbl);
+
+    var opRow = document.createElement('div');
+    opRow.className = 'slider-row';
+    opRow.innerHTML = '<div class="slider-head"><span>Opacity</span><span class="val"></span></div>';
+    var opVal = opRow.querySelector('.val');
+    var op = document.createElement('input');
+    op.type = 'range'; op.min = 0; op.max = 100; op.step = 1;
+    op.value = Math.round(ov.opacity * 100);
+    opVal.textContent = op.value + ' %';
+    op.addEventListener('input', function () {
+      ov.opacity = parseInt(op.value, 10) / 100; opVal.textContent = op.value + ' %'; requestRender();
+    });
+    opRow.appendChild(op);
+
+    var sizeRow = document.createElement('div');
+    sizeRow.className = 'slider-row';
+    sizeRow.style.display = ov.tile ? '' : 'none';
+    sizeRow.innerHTML = '<div class="slider-head"><span>Tile size</span><span class="val"></span></div>';
+    var szVal = sizeRow.querySelector('.val');
+    var sz = document.createElement('input');
+    sz.type = 'range'; sz.min = 1; sz.max = 12; sz.step = 0.5;
+    sz.value = ov.scale || 1;
+    szVal.textContent = (ov.scale || 1) + '×';
+    sz.addEventListener('input', function () {
+      ov.scale = parseFloat(sz.value); szVal.textContent = ov.scale + '×'; requestRender();
+    });
+    sizeRow.appendChild(sz);
+
+    item.appendChild(top); item.appendChild(ctrls);
+    item.appendChild(opRow); item.appendChild(sizeRow);
+    overlayList.appendChild(item);
+  });
+}
+
+document.getElementById('btnAddOverlay').addEventListener('click', function () { overlayInput.click(); });
+overlayInput.addEventListener('change', function () {
+  if (overlayInput.files && overlayInput.files[0]) addOverlay(overlayInput.files[0]);
+  overlayInput.value = '';
 });
 
 var qualInput = document.getElementById('quality');

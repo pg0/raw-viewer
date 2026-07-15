@@ -9,11 +9,12 @@ Live demo: <https://pg0.github.io/raw-viewer/>
 - RAW decode (LibRaw + dcraw), plus JPEG / PNG / WebP / BMP / GIF / HEIC
 - Real-time WebGL2 adjustments: exposure, contrast, highlights/shadows, white balance, saturation, vibrance, film grain (filmgrainer-style, image-anchored)
 - Two `.cube` LUT slots (converter + style) with per-slot intensity
-- Image overlays: stack multiple images or SVGs (grain, film strip, light leaks, dust) blended over the photo. Per overlay: blend mode (Normal / Screen / Multiply / Add), opacity, keep-aspect (contain-fit vs stretch), tiling, scale/zoom (0.1x - 12x), X/Y offset, and an optional alpha (chroma-key) colour to knock a colour out to transparent. Drop an image straight onto the Overlays panel to add it. Overlays track crop/rotation and bake into the export
-- Free-angle rotation (type any degree, or 90&deg; CW/CCW icons), crop with aspect presets (Free / Mobile 20:9 / 4:5 / 1:1 / 16:9), zoom/pan
+- Overlays: stack images, SVGs, text, or emoji (grain, film strip, light leaks, dust, stickers, captions) blended over the photo. Add via the panel buttons (+ Image / + Text / + Emoji) or by dropping an image onto the panel. Per overlay: blend mode (Normal / Screen / Multiply / Add), opacity, keep-aspect (contain-fit vs stretch), tiling, scale/zoom (0.1x - 12x), X/Y offset, and an optional alpha (chroma-key) colour to knock a colour out to transparent. Select an overlay and drag it on the photo to reposition it. Overlays track crop/rotation and bake into the export
+- Free-angle rotation (type any degree, or 90&deg; CW/CCW icons), crop with aspect presets (Free / 1:1 / 5:4 / 16:9 / 20:9) and a Portrait/Landscape orientation toggle, zoom/pan
 - Histogram, per-group show/hide (A/B compare), JPEG export at full resolution
 - Double-click (or double-tap on touch) any slider or its label to reset it
-- Always-visible top bar (Open / Save) and a mobile-friendly layout: photo pinned on top, controls scroll below, pinch-to-zoom, and a button to switch the photo pane between 2/3 and 1/3 of the screen
+- "Full resolution" toggle appears only for RAW files (nothing to re-decode behind a JPEG/PNG)
+- Always-visible top bar (title + Open / Save) and a mobile-friendly layout: photo pinned on top, controls scroll below, pinch-to-zoom, vertical drag scrolls the panel (doesn't nudge sliders), and a button to switch the photo pane between 2/3 and 1/3 of the screen
 
 ## Two ways to run
 

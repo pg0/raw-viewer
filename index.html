@@ -213,6 +213,13 @@
   .overlay-tile { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; color: #bbb; white-space: nowrap; }
   .overlay-color { width: 26px; height: 22px; padding: 0; border: 1px solid #444; border-radius: 4px; background: #333; cursor: pointer; }
   #overlaypanel.ovdrag { outline: 2px dashed #4a90d9; outline-offset: -2px; border-radius: 6px; background: rgba(74,144,217,.06); }
+  .overlay-item.selected { border-color: #3a72ad; box-shadow: 0 0 0 1px #3a72ad; }
+  .overlay-top { cursor: pointer; }
+  #emojipalette { display: flex; flex-wrap: wrap; gap: 3px; margin-top: 6px; }
+  #emojipalette[hidden] { display: none; }
+  #emojipalette button { font-size: 18px; line-height: 1; padding: 5px; min-width: 34px; background: #262626; border: 1px solid #383838; border-radius: 5px; cursor: pointer; }
+  #emojipalette button:hover { background: #333; }
+  #btnOrient { padding: 4px 9px; font-size: 11px; background: #2a2a2a; }
   .credit { margin-top: auto; padding-top: 8px; font-size: 11px; color: #666; text-align: center; line-height: 1.6; }
   .credit a { color: #7aa7d0; text-decoration: none; }
   .credit a:hover { text-decoration: underline; }
@@ -418,9 +425,10 @@
     #topbar button { padding: 8px 12px; }
   }
   @media (max-width: 420px) {
-    #apptitle { display: none; }
-    #topbar .topbar-actions { flex: 1; }
-    #topbar .topbar-actions button { flex: 1; }
+    /* Keep the "RAW Viewer" title visible, left of the buttons. */
+    #apptitle { display: block; font-size: 12px; }
+    #topbar { gap: 6px; padding: 8px 10px; }
+    #topbar button { padding: 8px 10px; font-size: 12px; }
   }
 </style>
 </head>
@@ -496,14 +504,15 @@
         <button id="btnCropCancel">Cancel</button>
       </div>
       <div class="btnrow cropratios">
-        <button class="ratio active" data-ar="0" title="Free ratio">Free</button>
-        <button class="ratio" data-ar="0.45" title="20:9 portrait (modern phone)">Mobile 20:9</button>
-        <button class="ratio" data-ar="0.8" title="4:5 portrait">4:5</button>
-        <button class="ratio" data-ar="1" title="Square">1:1</button>
-        <button class="ratio" data-ar="1.7778" title="16:9 landscape">16:9</button>
+        <button class="ratio active" data-w="0" data-h="0" title="Free ratio">Free</button>
+        <button id="btnOrient" title="Swap portrait / landscape">&#8646; Landscape</button>
+        <button class="ratio" data-w="1" data-h="1" title="Square">1:1</button>
+        <button class="ratio" data-w="5" data-h="4">5:4</button>
+        <button class="ratio" data-w="16" data-h="9">16:9</button>
+        <button class="ratio" data-w="20" data-h="9" title="Phone screen">20:9</button>
       </div>
     </div>
-    <label class="togglerow">
+    <label class="togglerow" id="fullResRow" style="display:none">
       <input type="checkbox" id="chkFullRes" disabled>
       Full resolution (slower)
     </label>
@@ -545,8 +554,12 @@
       <p class="hint">Blend grain, film strip, light leaks and more over the photo. Overlays track crop/rotation and are baked into the export.</p>
       <div id="overlaylist"></div>
       <div class="btnrow">
-        <button id="btnAddOverlay" disabled>+ Add overlay image</button>
+        <button id="btnAddOverlay" disabled>+ Image</button>
+        <button id="btnAddText" disabled>+ Text</button>
+        <button id="btnAddEmoji" disabled>+ Emoji</button>
       </div>
+      <div id="emojipalette" hidden></div>
+      <p class="hint" id="overlayMoveHint" hidden>Selected. Drag on the photo to move it.</p>
     </details>
     <div class="panel">
       <h3>Export</h3>
@@ -777,6 +790,9 @@ var state = {
   crop: { x: 0, y: 0, w: 1, h: 1 }, // displayed-normalized crop window
   cropping: false,     // true while the crop tool is active
   cropAspect: 0,       // locked crop ratio (pixel W:H); 0 = free
+  cropPortrait: false, // crop ratio orientation toggle
+  cropRatioWH: null,   // [w,h] of the active ratio preset (null = free)
+  selectedOverlay: null, // index of the overlay being moved by canvas drag
   thumbBytes: null,    // embedded JPEG bytes, kept as fallback for undecodable RAWs
   busy: false,         // a load is in progress (blocks concurrent loads)
   fullRes: false,
@@ -1309,7 +1325,8 @@ function drawOverlays(vpW, vpH, angleDeg, flipY, zoom, pan, crop) {
       if (r >= 1) { bsy = r; } else { bsx = 1 / r; }
     }
     var sc = ov.scale || 1;               // <1 zooms in, >1 shrinks / tiles more
-    gl.uniform2f(ovUni.ovScale, bsx * sc, bsy * sc);
+    ov._sx = bsx * sc; ov._sy = bsy * sc; // remembered for canvas drag-to-move
+    gl.uniform2f(ovUni.ovScale, ov._sx, ov._sy);
     gl.uniform2f(ovUni.ovOffset, ov.offX || 0, ov.offY || 0);
     if (ov.chroma) {
       gl.uniform1i(ovUni.chromaOn, 1);
@@ -1493,9 +1510,20 @@ function setControlsEnabled(on) {
   document.getElementById('btnReset').disabled = !on;
   document.getElementById('btnExport').disabled = !on;
   document.getElementById('btnAddOverlay').disabled = !on;
+  document.getElementById('btnAddText').disabled = !on;
+  document.getElementById('btnAddEmoji').disabled = !on;
   document.getElementById('chkFullRes').disabled = !on;
+  syncFullResRow();
   updateRotField();           // controls enable right after a fresh load (angle reset to 0)
   if (on) updateCropAvail();  // refine the Crop button by orthogonality
+}
+
+/* The "Full resolution" toggle only makes sense behind a RAW; hide the whole
+ * row otherwise (it stays disabled for JPEG/PNG/embedded-JPEG fallbacks). */
+function syncFullResRow() {
+  var row = document.getElementById('fullResRow');
+  var chk = document.getElementById('chkFullRes');
+  if (row) row.style.display = chk.disabled ? 'none' : '';
 }
 
 /* Slider construction */
@@ -1941,6 +1969,7 @@ async function loadRasterImage(file) {
     var chk = document.getElementById('chkFullRes');
     chk.checked = false;
     chk.disabled = true; // no RAW behind a raster image
+    syncFullResRow();
     state.fullRes = false;
     requestRender();
   } catch (e2) {
@@ -2083,6 +2112,7 @@ async function loadEmbeddedThumb(thumbBytes) {
     setControlsEnabled(true);
     var chk = document.getElementById('chkFullRes');
     chk.checked = false; chk.disabled = true; // no raw behind the fallback JPEG
+    syncFullResRow();
     state.fullRes = false;
     requestRender();
     return { w: cw, h: ch };
@@ -2391,6 +2421,31 @@ function rasterizeSVG(file) {
   });
 }
 
+/* Shared: turn any drawable source (ImageBitmap/canvas) into an overlay.
+ * `over` overrides the per-overlay defaults (mode/opacity/keepAspect ...). */
+function addSourceOverlay(src, name, over) {
+  var w = src.width, h = src.height;
+  var tex = uploadOverlayTexture(src);
+  var ts = 40, r = Math.min(ts / w, ts / h, 1);
+  var tc = document.createElement('canvas');
+  tc.width = Math.max(1, Math.round(w * r));
+  tc.height = Math.max(1, Math.round(h * r));
+  tc.getContext('2d').drawImage(src, 0, 0, tc.width, tc.height);
+  var thumb = tc.toDataURL('image/png');
+  if (src.close) src.close();
+  var ov = {
+    name: name, tex: tex, w: w, h: h,
+    mode: 2, opacity: 0.7, tile: false, scale: 1,   // Screen @ 70% default (images)
+    offX: 0, offY: 0, keepAspect: false, chroma: null, chromaThresh: 0.15,
+    thumb: thumb
+  };
+  if (over) Object.keys(over).forEach(function (k) { ov[k] = over[k]; });
+  state.overlays.push(ov);
+  state.selectedOverlay = state.overlays.length - 1; // select the freshly added one
+  renderOverlayList();
+  requestRender();
+}
+
 async function addOverlay(file) {
   if (!gl) { toast('WebGL2 not available.'); return; }
   var src;
@@ -2400,24 +2455,67 @@ async function addOverlay(file) {
     toast('Could not load overlay: ' + excerpt(e.message || e));
     return;
   }
-  var w = src.width, h = src.height;
-  var tex = uploadOverlayTexture(src);
-  // small thumbnail for the list
-  var ts = 40, r = Math.min(ts / w, ts / h, 1);
-  var tc = document.createElement('canvas');
-  tc.width = Math.max(1, Math.round(w * r));
-  tc.height = Math.max(1, Math.round(h * r));
-  tc.getContext('2d').drawImage(src, 0, 0, tc.width, tc.height);
-  var thumb = tc.toDataURL('image/png');
-  if (src.close) src.close();
-  state.overlays.push({
-    name: file.name, tex: tex, w: w, h: h,
-    mode: 2, opacity: 0.7, tile: false, scale: 1,   // Screen @ 70% default
-    offX: 0, offY: 0, keepAspect: false, chroma: null, chromaThresh: 0.15,
-    thumb: thumb
+  addSourceOverlay(src, file.name);
+}
+
+/* Render a text string to a transparent canvas (white with a dark outline). */
+function renderTextToCanvas(text) {
+  var pad = 28, font = 150;
+  var fam = '800 ' + font + 'px system-ui, "Segoe UI", Arial, sans-serif';
+  var meas = document.createElement('canvas').getContext('2d');
+  meas.font = fam;
+  var tw = Math.ceil(meas.measureText(text).width);
+  var c = document.createElement('canvas');
+  c.width = Math.max(1, tw + pad * 2);
+  c.height = Math.max(1, Math.ceil(font * 1.35) + pad * 2);
+  var g = c.getContext('2d');
+  g.font = fam;
+  g.textAlign = 'center'; g.textBaseline = 'middle';
+  g.lineJoin = 'round';
+  g.strokeStyle = 'rgba(0,0,0,0.6)'; g.lineWidth = font * 0.14;
+  g.strokeText(text, c.width / 2, c.height / 2);
+  g.fillStyle = '#ffffff';
+  g.fillText(text, c.width / 2, c.height / 2);
+  return c;
+}
+
+/* Render an emoji glyph to a transparent square canvas. */
+function renderEmojiToCanvas(emoji) {
+  var size = 256;
+  var c = document.createElement('canvas'); c.width = size; c.height = size;
+  var g = c.getContext('2d');
+  g.font = Math.round(size * 0.78) + 'px "Segoe UI Emoji","Apple Color Emoji","Noto Color Emoji",sans-serif';
+  g.textAlign = 'center'; g.textBaseline = 'middle';
+  g.fillText(emoji, size / 2, size / 2 + size * 0.04);
+  return c;
+}
+
+function addTextOverlay() {
+  var t = window.prompt('Overlay text:', 'Sample');
+  if (t == null) return;
+  t = t.trim();
+  if (!t) return;
+  addSourceOverlay(renderTextToCanvas(t), 'Text: ' + t, { mode: 0, opacity: 1, keepAspect: true });
+}
+
+function addEmojiOverlay(emoji) {
+  addSourceOverlay(renderEmojiToCanvas(emoji), emoji, { mode: 0, opacity: 1, keepAspect: true });
+}
+
+var EMOJIS = ['😀','😎','😍','🥳','😂','😉',
+  '🔥','⭐','❤️','👍','✨','🎉','💯','📸',
+  '🌈','⚡','💥','👀','🙌','🎯','☀️','🌙',
+  '💫','🍀'];
+
+function buildEmojiPalette() {
+  var pal = document.getElementById('emojipalette');
+  if (!pal || pal.childElementCount) return;
+  EMOJIS.forEach(function (e) {
+    var b = document.createElement('button');
+    b.type = 'button'; b.textContent = e;
+    b.addEventListener('click', function () { addEmojiOverlay(e); pal.hidden = true; });
+    pal.appendChild(b);
   });
-  renderOverlayList();
-  requestRender();
 }
 
 function removeOverlay(idx) {
@@ -2425,8 +2523,16 @@ function removeOverlay(idx) {
   if (!ov) return;
   if (ov.tex) gl.deleteTexture(ov.tex);
   state.overlays.splice(idx, 1);
+  // keep selection pointing at a valid overlay (or clear it)
+  if (state.selectedOverlay === idx) state.selectedOverlay = null;
+  else if (state.selectedOverlay != null && state.selectedOverlay > idx) state.selectedOverlay--;
   renderOverlayList();
   requestRender();
+}
+
+function selectOverlay(idx) {
+  state.selectedOverlay = (state.selectedOverlay === idx) ? null : idx;
+  renderOverlayList();
 }
 
 function hexToRgb(hex) {
@@ -2467,10 +2573,11 @@ function renderOverlayList() {
   overlayList.innerHTML = '';
   state.overlays.forEach(function (ov, idx) {
     var item = document.createElement('div');
-    item.className = 'overlay-item';
+    item.className = 'overlay-item' + (state.selectedOverlay === idx ? ' selected' : '');
 
     var top = document.createElement('div');
     top.className = 'overlay-top';
+    top.title = 'Click to select, then drag on the photo to move';
     var img = document.createElement('img');
     img.className = 'overlay-thumb';
     img.src = ov.thumb;
@@ -2482,7 +2589,9 @@ function renderOverlayList() {
     rm.className = 'overlay-remove';
     rm.textContent = '×';
     rm.title = 'Remove overlay';
-    rm.addEventListener('click', function () { removeOverlay(idx); });
+    rm.addEventListener('click', function (e) { e.stopPropagation(); removeOverlay(idx); });
+    // Click the thumbnail/name row to select this overlay for canvas dragging.
+    top.addEventListener('click', function () { selectOverlay(idx); });
     top.appendChild(img); top.appendChild(name); top.appendChild(rm);
 
     var ctrls = document.createElement('div');
@@ -2569,12 +2678,20 @@ function renderOverlayList() {
     item.appendChild(chromaHead); item.appendChild(threshRow);
     overlayList.appendChild(item);
   });
+  var hint = document.getElementById('overlayMoveHint');
+  if (hint) hint.hidden = state.selectedOverlay == null;
 }
 
 document.getElementById('btnAddOverlay').addEventListener('click', function () { overlayInput.click(); });
 overlayInput.addEventListener('change', function () {
   if (overlayInput.files && overlayInput.files[0]) addOverlay(overlayInput.files[0]);
   overlayInput.value = '';
+});
+document.getElementById('btnAddText').addEventListener('click', addTextOverlay);
+document.getElementById('btnAddEmoji').addEventListener('click', function () {
+  buildEmojiPalette();
+  var pal = document.getElementById('emojipalette');
+  pal.hidden = !pal.hidden;
 });
 
 var qualInput = document.getElementById('quality');
@@ -2725,10 +2842,26 @@ canvasWrap.addEventListener('pointerdown', function (e) {
   if (activePointers.size >= 2) {
     startPinch();
     canvasWrap.classList.remove('panning');
-  } else if (state.zoom > 1) {
+  } else if (overlaySelected() || state.zoom > 1) {
     canvasWrap.classList.add('panning');
   }
 });
+
+function overlaySelected() {
+  return state.selectedOverlay != null && !!state.overlays[state.selectedOverlay];
+}
+
+/* Drag the selected overlay: screen delta -> UV offset (negated so the overlay
+ * follows the finger). Ignores rotation (mapping is exact at 0 degrees). */
+function moveSelectedOverlay(dxPx, dyPx) {
+  var ov = state.overlays[state.selectedOverlay];
+  if (!ov) return;
+  var ir = fullImageScreenRect();
+  var z = state.zoom || 1;
+  ov.offX += -(ov._sx || 1) * (dxPx / (ir.w * z));
+  ov.offY += -(ov._sy || 1) * (dyPx / (ir.h * z));
+  requestRender();
+}
 
 canvasWrap.addEventListener('pointermove', function (e) {
   var prev = activePointers.get(e.pointerId);
@@ -2761,20 +2894,27 @@ canvasWrap.addEventListener('pointermove', function (e) {
     return;
   }
 
-  if (activePointers.size === 1 && state.zoom > 1) {
-    state.pan[0] += (cur.x - prev.x) / rect.width * 2;
-    state.pan[1] -= (cur.y - prev.y) / rect.height * 2;
-    clampPan();
-    requestRender();
+  if (activePointers.size === 1) {
+    if (overlaySelected()) {
+      moveSelectedOverlay(cur.x - prev.x, cur.y - prev.y);
+    } else if (state.zoom > 1) {
+      state.pan[0] += (cur.x - prev.x) / rect.width * 2;
+      state.pan[1] -= (cur.y - prev.y) / rect.height * 2;
+      clampPan();
+      requestRender();
+    }
   }
 });
 
 function releasePointer(e) {
   if (!activePointers.has(e.pointerId)) return;
+  var wasMovingOverlay = overlaySelected();
   activePointers.delete(e.pointerId);
   if (activePointers.size < 2) pinch = null;
-  if (activePointers.size === 1 && state.zoom > 1) canvasWrap.classList.add('panning');
+  if (activePointers.size === 1 && (overlaySelected() || state.zoom > 1)) canvasWrap.classList.add('panning');
   else canvasWrap.classList.remove('panning');
+  // Refresh the offset sliders to match a finished drag.
+  if (activePointers.size === 0 && wasMovingOverlay) renderOverlayList();
 }
 canvasWrap.addEventListener('pointerup', releasePointer);
 canvasWrap.addEventListener('pointercancel', releasePointer);
@@ -2826,17 +2966,57 @@ function dispAspect() {
  * centered rectangle of that ratio inside the image. */
 function setCropAspect(targetAR) {
   state.cropAspect = targetAR;
-  var btns = document.querySelectorAll('.cropratios .ratio');
-  for (var i = 0; i < btns.length; i++) {
-    btns[i].classList.toggle('active',
-      parseFloat(btns[i].getAttribute('data-ar')) === targetAR);
-  }
+  if (targetAR <= 0) state.cropRatioWH = null;
+  updateRatioActive();
   if (targetAR > 0) {
     var k = targetAR / dispAspect();          // normalized width/height
     var w = Math.min(1, k), h = Math.min(1, 1 / k);
     state.crop = { x: (1 - w) / 2, y: (1 - h) / 2, w: w, h: h };
     updateCropBox();
     requestRender();
+  }
+}
+
+/* A ratio button's aspect (W/H) in the current orientation. Free -> 0. */
+function ratioBtnAR(b) {
+  var w = parseFloat(b.getAttribute('data-w')), h = parseFloat(b.getAttribute('data-h'));
+  if (!(w > 0 && h > 0)) return 0;
+  return state.cropPortrait ? h / w : w / h;
+}
+
+function updateRatioActive() {
+  var btns = document.querySelectorAll('.cropratios .ratio');
+  for (var i = 0; i < btns.length; i++) {
+    var ar = ratioBtnAR(btns[i]);
+    var active = ar === 0
+      ? (state.cropAspect === 0)
+      : Math.abs(ar - state.cropAspect) < 1e-4;
+    btns[i].classList.toggle('active', active);
+  }
+}
+
+/* Relabel ratio buttons + the orientation toggle for the current orientation. */
+function updateRatioLabels() {
+  var btns = document.querySelectorAll('.cropratios .ratio');
+  for (var i = 0; i < btns.length; i++) {
+    var w = parseFloat(btns[i].getAttribute('data-w')), h = parseFloat(btns[i].getAttribute('data-h'));
+    if (w > 0 && h > 0 && w !== h) {
+      btns[i].textContent = state.cropPortrait ? (h + ':' + w) : (w + ':' + h);
+    }
+  }
+  var ob = document.getElementById('btnOrient');
+  if (ob) ob.innerHTML = (state.cropPortrait ? '&#8646; Portrait' : '&#8646; Landscape');
+}
+
+function toggleOrientation() {
+  state.cropPortrait = !state.cropPortrait;
+  updateRatioLabels();
+  // Re-apply the active preset in the new orientation.
+  if (state.cropRatioWH) {
+    var wh = state.cropRatioWH;
+    setCropAspect(state.cropPortrait ? wh[1] / wh[0] : wh[0] / wh[1]);
+  } else {
+    updateRatioActive();
   }
 }
 
@@ -2957,9 +3137,13 @@ document.getElementById('btnCropReset').addEventListener('click', function () {
 });
 Array.prototype.forEach.call(document.querySelectorAll('.cropratios .ratio'), function (b) {
   b.addEventListener('click', function () {
-    setCropAspect(parseFloat(b.getAttribute('data-ar')));
+    var w = parseFloat(b.getAttribute('data-w')), h = parseFloat(b.getAttribute('data-h'));
+    state.cropRatioWH = (w > 0 && h > 0) ? [w, h] : null;
+    setCropAspect(ratioBtnAR(b));
   });
 });
+document.getElementById('btnOrient').addEventListener('click', toggleOrientation);
+updateRatioLabels();
 
 window.addEventListener('resize', requestRender);
 </script>

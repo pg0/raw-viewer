@@ -1,9 +1,16 @@
 <!DOCTYPE html>
-<html lang="de">
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>RAW Viewer</title>
+<meta name="author" content="Patrick Gawron (pg0)">
+<meta name="description" content="Browser RAW photo viewer and editor - LibRaw / dcraw decode, WebGL2 adjustments, LUTs, crop, film grain.">
+<!-- Enables cross-origin isolation (SharedArrayBuffer) on static hosts like
+     GitHub Pages that cannot send COOP/COEP headers, so the LibRaw pthreads
+     wasm works there. No-op when the origin already sends the headers
+     (e.g. serve.py) or under file://. Must load first (may reload once). -->
+<script src="coi-serviceworker.js"></script>
+<title>RAW Viewer - by Patrick Gawron</title>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   [hidden] { display: none !important; }
@@ -160,6 +167,9 @@
   }
   #sidebar::-webkit-scrollbar { width: 8px; }
   #sidebar::-webkit-scrollbar-thumb { background: #3a3a3a; border-radius: 4px; }
+  .credit { margin-top: auto; padding-top: 8px; font-size: 11px; color: #666; text-align: center; line-height: 1.6; }
+  .credit a { color: #7aa7d0; text-decoration: none; }
+  .credit a:hover { text-decoration: underline; }
 
   .btnrow { display: flex; gap: 6px; flex-wrap: wrap; }
   button {
@@ -442,11 +452,15 @@
       <summary>Metadata</summary>
       <table id="metatable"></table>
     </details>
+    <div class="credit">
+      by <a href="https://github.com/pg0/raw-viewer" target="_blank" rel="noopener">Patrick Gawron</a>
+      &middot; <a href="https://github.com/pg0/raw-viewer" target="_blank" rel="noopener">github.com/pg0/raw-viewer</a>
+    </div>
   </aside>
 </div>
 <div id="toast"></div>
 <input type="file" id="fileinput" hidden
-  accept=".arw,.cr2,.nef,.dng,.raf,.orf,.rw2,.pef,.srw,.srf,.sr2,.kdc,.dcr,.mrw,.3fr,.erf,.mef,.mos,.x3f,.jpg,.jpeg,.png,.webp,.bmp,.gif,.heic,.heif">
+  accept=".arw,.cr2,.cr3,.nef,.nrw,.dng,.raf,.orf,.rw2,.raw,.pef,.srw,.srf,.sr2,.kdc,.dcr,.mrw,.3fr,.erf,.mef,.mos,.x3f,.gpr,.rwl,.iiq,.cap,.fff,.arq,.jpg,.jpeg,.png,.webp,.bmp,.gif,.heic,.heif">
 <input type="file" id="lutinput" hidden accept=".cube">
 
 <script src="dcraw.js"></script>

@@ -3337,6 +3337,11 @@ function startPinch() {
 
 canvasWrap.addEventListener('pointerdown', function (e) {
   if (!state.tex || state.cropping) return;
+  // The 100% / resize-pane buttons are layered inside canvasWrap. Capturing the
+  // pointer here would redirect their release and swallow the button's click, so
+  // ignore presses that land on an actual HTML control (the gizmo's SVG drag
+  // handles are not matched, so sticker manipulation still captures normally).
+  if (e.target.closest && e.target.closest('button, input, select, textarea, a')) return;
   if (e.pointerType === 'mouse' && e.button !== 0) return;
   activePointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
   canvasWrap.setPointerCapture(e.pointerId);

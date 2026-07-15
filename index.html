@@ -448,6 +448,17 @@
   .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
   .modal-actions button { padding: 8px 16px; }
 
+  /* Transform gizmo (resize + rotate frame) for text/emoji overlays */
+  #gizmo { position: absolute; inset: 0; z-index: 7; pointer-events: none; overflow: visible; }
+  #gizmo[hidden] { display: none; }
+  #gizmo .giz-frame { fill: none; stroke: #4a90d9; stroke-width: 1.4; stroke-dasharray: 5 4; pointer-events: none; }
+  #gizmo .giz-handle {
+    fill: #fff; stroke: #4a90d9; stroke-width: 1.4;
+    pointer-events: auto; cursor: pointer;
+  }
+  #gizmo .giz-rot-line { stroke: #4a90d9; stroke-width: 1.4; pointer-events: none; }
+  #gizmo .giz-rot { fill: #4a90d9; stroke: #fff; stroke-width: 1.4; pointer-events: auto; cursor: grab; r: 8; }
+
   /* Mobile / narrow: stack the photo on top (always visible), controls scroll
      below. Open / Save stay in the sticky top bar. */
   @media (max-width: 820px) {
@@ -495,6 +506,7 @@
         <p>RAW (ARW, CR2, NEF, DNG, RAF ...), JPEG, PNG, WebP, HEIC - or a .cube LUT</p>
       </div>
       <div id="zoomchip" hidden></div>
+      <svg id="gizmo" hidden></svg>
       <button id="btnViewSize" title="Resize photo pane" aria-label="Resize photo pane">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
              stroke-linecap="round" stroke-linejoin="round">
@@ -1088,14 +1100,26 @@ var OVERLAY_VERT = [
   'uniform vec2 u_pan;',
   'uniform vec2 u_ovScale;', // overlay UV scale/tiling (1 = stretch to fit, <1 = zoom in)
   'uniform vec2 u_ovOffset;', // overlay UV offset (pan the texture)
+  'uniform int u_ovSticker;', // 1 = free sticker (rotatable sub-quad), 0 = fill/tile
+  'uniform float u_ovRot;',   // sticker rotation (rad)
+  'uniform vec2 u_ovHalf;',   // sticker half-extent in image-local units
+  'uniform vec2 u_ovPos;',    // sticker center in image-local units
   'out vec2 v_uv;',
   'void main() {',
-  '  vec2 local = vec2(a_pos.x * 0.5 + 0.5, 0.5 - a_pos.y * 0.5);',
-  '  v_uv = (local - 0.5) * u_ovScale + 0.5 + u_ovOffset;',
   '  float c = cos(u_rot);',
   '  float s = sin(u_rot);',
-  '  vec2 p = mat2(c, s, -s, c) * (a_pos * u_imgHalf);',
-  '  gl_Position = vec4(p * u_scale * u_zoom + u_pan, 0.0, 1.0);',
+  '  if (u_ovSticker == 1) {',
+  '    v_uv = vec2(a_pos.x * 0.5 + 0.5, 0.5 - a_pos.y * 0.5);',
+  '    float cr = cos(u_ovRot), sr = sin(u_ovRot);',
+  '    vec2 sl = mat2(cr, sr, -sr, cr) * (a_pos * u_ovHalf) + u_ovPos;',
+  '    vec2 p = mat2(c, s, -s, c) * sl;',
+  '    gl_Position = vec4(p * u_scale * u_zoom + u_pan, 0.0, 1.0);',
+  '  } else {',
+  '    vec2 local = vec2(a_pos.x * 0.5 + 0.5, 0.5 - a_pos.y * 0.5);',
+  '    v_uv = (local - 0.5) * u_ovScale + 0.5 + u_ovOffset;',
+  '    vec2 p = mat2(c, s, -s, c) * (a_pos * u_imgHalf);',
+  '    gl_Position = vec4(p * u_scale * u_zoom + u_pan, 0.0, 1.0);',
+  '  }',
   '}'
 ].join('\n');
 var OVERLAY_FRAG = [
@@ -1110,9 +1134,15 @@ var OVERLAY_FRAG = [
   'uniform float u_chromaThresh;',
   'in vec2 v_uv;',
   'out vec4 frag;',
+  'uniform int u_ovSticker;',
   'void main() {',
-  '  vec2 uv = u_tile == 1 ? fract(v_uv) : v_uv;',
-  '  if (u_tile == 0 && (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0)) { discard; }',
+  '  vec2 uv;',
+  '  if (u_ovSticker == 1) {',
+  '    uv = v_uv;', // sticker: geometry bounds the quad, sample the full texture
+  '  } else {',
+  '    uv = u_tile == 1 ? fract(v_uv) : v_uv;',
+  '    if (u_tile == 0 && (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0)) { discard; }',
+  '  }',
   '  vec4 t = texture(u_ov, uv);',
   '  float a = t.a * u_opacity;',
   '  if (u_chromaOn == 1 && distance(t.rgb, u_chroma) <= u_chromaThresh) { a = 0.0; }',
@@ -1228,7 +1258,11 @@ function initGL() {
     tile: gl.getUniformLocation(ovProg, 'u_tile'),
     chromaOn: gl.getUniformLocation(ovProg, 'u_chromaOn'),
     chroma: gl.getUniformLocation(ovProg, 'u_chroma'),
-    chromaThresh: gl.getUniformLocation(ovProg, 'u_chromaThresh')
+    chromaThresh: gl.getUniformLocation(ovProg, 'u_chromaThresh'),
+    sticker: gl.getUniformLocation(ovProg, 'u_ovSticker'),
+    ovRot: gl.getUniformLocation(ovProg, 'u_ovRot'),
+    ovHalf: gl.getUniformLocation(ovProg, 'u_ovHalf'),
+    ovPos: gl.getUniformLocation(ovProg, 'u_ovPos')
   };
   gl.useProgram(ovProg);
   gl.uniform1i(ovUni.ov, 0); // overlays sample from texture unit 0
@@ -1359,6 +1393,12 @@ function drawOverlays(vpW, vpH, angleDeg, flipY, zoom, pan, crop) {
   var bboxHX = A * ca + sa, bboxHY = A * sa + ca;
   var vpAspect = vpW / vpH;
   var k = Math.min(vpAspect / bboxHX, 1 / bboxHY); // contain (match base letterbox)
+  // Cache the screen-render projection so the transform gizmo can map
+  // image-local coordinates to screen pixels.
+  if (flipY === 1) {
+    ovView = { A: A, k: k, vpAspect: vpAspect, angleRad: angleRad, zoom: zoom || 1,
+      panX: pan ? pan[0] : 0, panY: pan ? pan[1] : 0 };
+  }
   gl.useProgram(ovProg);
   gl.activeTexture(gl.TEXTURE0);
   gl.uniform1f(ovUni.rot, angleRad);
@@ -1375,17 +1415,6 @@ function drawOverlays(vpW, vpH, angleDeg, flipY, zoom, pan, crop) {
     gl.uniform1f(ovUni.opacity, ov.opacity);
     gl.uniform1i(ovUni.mode, ov.mode | 0);
     gl.uniform1i(ovUni.tile, ov.tile ? 1 : 0);
-    // Keep the overlay's own aspect (contain-fit) instead of stretching to the photo.
-    var bsx = 1, bsy = 1;
-    if (ov.keepAspect) {
-      var ovAR = (ov.w && ov.h) ? ov.w / ov.h : 1;
-      var r = ovAR / A;
-      if (r >= 1) { bsy = r; } else { bsx = 1 / r; }
-    }
-    var sc = ov.scale || 1;               // <1 zooms in, >1 shrinks / tiles more
-    ov._sx = bsx * sc; ov._sy = bsy * sc; // remembered for canvas drag-to-move
-    gl.uniform2f(ovUni.ovScale, ov._sx, ov._sy);
-    gl.uniform2f(ovUni.ovOffset, ov.offX || 0, ov.offY || 0);
     if (ov.chroma) {
       gl.uniform1i(ovUni.chromaOn, 1);
       gl.uniform3f(ovUni.chroma, ov.chroma[0], ov.chroma[1], ov.chroma[2]);
@@ -1393,11 +1422,58 @@ function drawOverlays(vpW, vpH, angleDeg, flipY, zoom, pan, crop) {
     } else {
       gl.uniform1i(ovUni.chromaOn, 0);
     }
+    if (isSticker(ov)) {
+      // Free sticker: contain-fit half-extents (in image-local units) x scale,
+      // positioned by (posX,posY), rotated by ov.rot.
+      var ovAR = (ov.w && ov.h) ? ov.w / ov.h : 1;
+      var hlx, hly;
+      if (ovAR >= A) { hlx = A; hly = A / ovAR; } else { hlx = ovAR; hly = 1; }
+      var scS = ov.scale || 1;
+      hlx *= scS; hly *= scS;
+      ov._half = [hlx, hly];
+      gl.uniform1i(ovUni.sticker, 1);
+      gl.uniform1f(ovUni.ovRot, (ov.rot || 0) * Math.PI / 180);
+      gl.uniform2f(ovUni.ovHalf, hlx, hly);
+      gl.uniform2f(ovUni.ovPos, ov.posX || 0, ov.posY || 0);
+    } else {
+      gl.uniform1i(ovUni.sticker, 0);
+      // Keep the overlay's own aspect (contain-fit) instead of stretching.
+      var bsx = 1, bsy = 1;
+      if (ov.keepAspect) {
+        var iar = (ov.w && ov.h) ? ov.w / ov.h : 1;
+        var r = iar / A;
+        if (r >= 1) { bsy = r; } else { bsx = 1 / r; }
+      }
+      var sc = ov.scale || 1;
+      ov._sx = bsx * sc; ov._sy = bsy * sc; // remembered for canvas drag-to-move
+      gl.uniform2f(ovUni.ovScale, ov._sx, ov._sy);
+      gl.uniform2f(ovUni.ovOffset, ov.offX || 0, ov.offY || 0);
+    }
     setOverlayBlend(ov.mode | 0);
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
   }
   gl.disable(gl.BLEND);
   gl.bindTexture(gl.TEXTURE_2D, state.tex); // leave unit 0 on the image
+}
+
+var ovView = null;
+function isSticker(ov) { return ov && (ov.kind === 'text' || ov.kind === 'emoji'); }
+
+/* Map an image-local point (units where the photo spans x in [-A,A], y in
+ * [-1,1]) to screen pixels within #canvaswrap, using the cached screen view. */
+function imageLocalToScreen(lx, ly) {
+  var v = ovView;
+  if (!v) return null;
+  var c = Math.cos(v.angleRad), s = Math.sin(v.angleRad);
+  var px = c * lx - s * ly;         // mat2(c,s,-s,c) * (lx,ly)
+  var py = s * lx + c * ly;
+  var clipX = px * (v.k / v.vpAspect) * v.zoom + v.panX;
+  var clipY = py * (v.k) * v.zoom + v.panY;   // flipY = 1 on screen
+  var Wc = canvasWrap.clientWidth, Hc = canvasWrap.clientHeight;
+  return {
+    x: (clipX * 0.5 + 0.5) * Wc,
+    y: (0.5 - clipY * 0.5) * Hc
+  };
 }
 
 function resizeCanvas() {
@@ -1439,6 +1515,7 @@ function render() {
   drawOverlays(canvas.width, canvas.height, state.angleDeg, 1, z, p, activeCrop);
   updateZoomChip();
   updateCropBox();
+  updateGizmo();
   scheduleHistogram();
 }
 
@@ -2495,6 +2572,7 @@ function addSourceOverlay(src, name, over) {
     name: name, tex: tex, w: w, h: h, kind: 'image',
     mode: 2, opacity: 0.7, tile: false, scale: 1,   // Screen @ 70% default (images)
     offX: 0, offY: 0, keepAspect: false, chroma: null, chromaThresh: 0.15,
+    posX: 0, posY: 0, rot: 0,                        // sticker placement (text/emoji)
     thumb: thumb
   };
   if (over) Object.keys(over).forEach(function (k) { ov[k] = over[k]; });
@@ -2611,7 +2689,7 @@ function submitTextModal() {
   if (textModalEditIdx != null && state.overlays[textModalEditIdx]) {
     updateOverlaySource(textModalEditIdx, canvas, name, { text: t, textColor: color });
   } else {
-    addSourceOverlay(canvas, name, { mode: 0, opacity: 1, keepAspect: true, kind: 'text', text: t, textColor: color });
+    addSourceOverlay(canvas, name, { mode: 0, opacity: 1, kind: 'text', scale: 0.6, text: t, textColor: color });
   }
   closeTextModal();
 }
@@ -2626,7 +2704,7 @@ textModalInput.addEventListener('keydown', function (e) {
 });
 
 function addEmojiOverlay(emoji) {
-  addSourceOverlay(renderEmojiToCanvas(emoji), emoji, { mode: 0, opacity: 1, keepAspect: true, kind: 'emoji' });
+  addSourceOverlay(renderEmojiToCanvas(emoji), emoji, { mode: 0, opacity: 1, kind: 'emoji', scale: 0.4 });
 }
 
 var EMOJIS = ['😀','😎','😍','🥳','😂','😉',
@@ -2660,6 +2738,7 @@ function removeOverlay(idx) {
 function selectOverlay(idx) {
   state.selectedOverlay = (state.selectedOverlay === idx) ? null : idx;
   renderOverlayList();
+  requestRender();   // refresh the transform gizmo
 }
 
 /* Move an overlay in the stack (draw order = array order; later = on top). */
@@ -2766,6 +2845,8 @@ function renderOverlayList() {
       if (!isNaN(from)) reorderOverlay(from, idx);
     });
 
+    var sticker = isSticker(ov);
+
     var ctrls = document.createElement('div');
     ctrls.className = 'overlay-ctrls';
     var sel = document.createElement('select');
@@ -2776,71 +2857,76 @@ function renderOverlayList() {
       sel.appendChild(o);
     });
     sel.addEventListener('change', function () { ov.mode = parseInt(sel.value, 10); requestRender(); });
+    ctrls.appendChild(sel);
 
-    var aspLbl = document.createElement('label');
-    aspLbl.className = 'overlay-tile';
-    var aspChk = document.createElement('input');
-    aspChk.type = 'checkbox'; aspChk.checked = !!ov.keepAspect;
-    aspChk.addEventListener('change', function () { ov.keepAspect = aspChk.checked; requestRender(); });
-    aspLbl.appendChild(aspChk); aspLbl.appendChild(document.createTextNode(' Keep aspect'));
+    // Keep-aspect + Tile only make sense for image overlays (stickers are geometry).
+    if (!sticker) {
+      var aspLbl = document.createElement('label');
+      aspLbl.className = 'overlay-tile';
+      var aspChk = document.createElement('input');
+      aspChk.type = 'checkbox'; aspChk.checked = !!ov.keepAspect;
+      aspChk.addEventListener('change', function () { ov.keepAspect = aspChk.checked; requestRender(); });
+      aspLbl.appendChild(aspChk); aspLbl.appendChild(document.createTextNode(' Keep aspect'));
 
-    var tileLbl = document.createElement('label');
-    tileLbl.className = 'overlay-tile';
-    var tileChk = document.createElement('input');
-    tileChk.type = 'checkbox'; tileChk.checked = !!ov.tile;
-    tileChk.addEventListener('change', function () { ov.tile = tileChk.checked; requestRender(); });
-    tileLbl.appendChild(tileChk); tileLbl.appendChild(document.createTextNode(' Tile'));
+      var tileLbl = document.createElement('label');
+      tileLbl.className = 'overlay-tile';
+      var tileChk = document.createElement('input');
+      tileChk.type = 'checkbox'; tileChk.checked = !!ov.tile;
+      tileChk.addEventListener('change', function () { ov.tile = tileChk.checked; requestRender(); });
+      tileLbl.appendChild(tileChk); tileLbl.appendChild(document.createTextNode(' Tile'));
 
-    ctrls.appendChild(sel); ctrls.appendChild(aspLbl); ctrls.appendChild(tileLbl);
+      ctrls.appendChild(aspLbl); ctrls.appendChild(tileLbl);
+    }
 
     var opRow = mkOverlaySlider('Opacity', 0, 100, 1, Math.round(ov.opacity * 100),
       function (v) { return Math.round(v) + ' %'; },
       function (v) { ov.opacity = v / 100; });
 
-    var scaleRow = mkOverlaySlider('Scale / zoom', 0.1, 12, 0.05, ov.scale || 1,
+    var scaleRow = mkOverlaySlider(sticker ? 'Size' : 'Scale / zoom', 0.05, 12, 0.05, ov.scale || 1,
       function (v) { return v.toFixed(2) + '×'; },
       function (v) { ov.scale = v; });
 
-    // Position is set by dragging the overlay on the photo (no offset sliders).
-
-    // Optional alpha (chroma) color: key a colour out to transparent.
-    var chromaHead = document.createElement('div');
-    chromaHead.className = 'overlay-ctrls';
-    var chromaLbl = document.createElement('label');
-    chromaLbl.className = 'overlay-tile';
-    var chromaChk = document.createElement('input');
-    chromaChk.type = 'checkbox'; chromaChk.checked = !!ov.chroma;
-    var chromaColor = document.createElement('input');
-    chromaColor.type = 'color';
-    chromaColor.className = 'overlay-color';
-    chromaColor.value = ov.chroma ? rgbToHex(ov.chroma) : '#00ff00';
-    chromaLbl.appendChild(chromaChk); chromaLbl.appendChild(document.createTextNode(' Alpha color'));
-    chromaHead.appendChild(chromaLbl); chromaHead.appendChild(chromaColor);
-
-    var threshRow = mkOverlaySlider('Alpha range', 0, 1, 0.01,
-      ov.chromaThresh != null ? ov.chromaThresh : 0.15,
-      function (v) { return v.toFixed(2); },
-      function (v) { ov.chromaThresh = v; });
-    threshRow.style.display = ov.chroma ? '' : 'none';
-
-    function applyChroma() {
-      if (chromaChk.checked) {
-        ov.chroma = hexToRgb(chromaColor.value);
-        threshRow.style.display = '';
-      } else {
-        ov.chroma = null;
-        threshRow.style.display = 'none';
-      }
-      requestRender();
-    }
-    chromaChk.addEventListener('change', applyChroma);
-    chromaColor.addEventListener('input', function () {
-      if (chromaChk.checked) { ov.chroma = hexToRgb(chromaColor.value); requestRender(); }
-    });
-
     item.appendChild(top); item.appendChild(ctrls);
     item.appendChild(opRow); item.appendChild(scaleRow);
-    item.appendChild(chromaHead); item.appendChild(threshRow);
+
+    if (sticker) {
+      // Stickers: rotation slider (frame handles do the same), no chroma key.
+      var rotRow = mkOverlaySlider('Rotate', -180, 180, 1, ov.rot || 0,
+        function (v) { return Math.round(v) + '°'; },
+        function (v) { ov.rot = v; });
+      item.appendChild(rotRow);
+    } else {
+      // Optional alpha (chroma) color for image overlays.
+      var chromaHead = document.createElement('div');
+      chromaHead.className = 'overlay-ctrls';
+      var chromaLbl = document.createElement('label');
+      chromaLbl.className = 'overlay-tile';
+      var chromaChk = document.createElement('input');
+      chromaChk.type = 'checkbox'; chromaChk.checked = !!ov.chroma;
+      var chromaColor = document.createElement('input');
+      chromaColor.type = 'color';
+      chromaColor.className = 'overlay-color';
+      chromaColor.value = ov.chroma ? rgbToHex(ov.chroma) : '#00ff00';
+      chromaLbl.appendChild(chromaChk); chromaLbl.appendChild(document.createTextNode(' Alpha color'));
+      chromaHead.appendChild(chromaLbl); chromaHead.appendChild(chromaColor);
+
+      var threshRow = mkOverlaySlider('Alpha range', 0, 1, 0.01,
+        ov.chromaThresh != null ? ov.chromaThresh : 0.15,
+        function (v) { return v.toFixed(2); },
+        function (v) { ov.chromaThresh = v; });
+      threshRow.style.display = ov.chroma ? '' : 'none';
+
+      chromaChk.addEventListener('change', function () {
+        if (chromaChk.checked) { ov.chroma = hexToRgb(chromaColor.value); threshRow.style.display = ''; }
+        else { ov.chroma = null; threshRow.style.display = 'none'; }
+        requestRender();
+      });
+      chromaColor.addEventListener('input', function () {
+        if (chromaChk.checked) { ov.chroma = hexToRgb(chromaColor.value); requestRender(); }
+      });
+      item.appendChild(chromaHead); item.appendChild(threshRow);
+    }
+
     overlayList.appendChild(item);
   });
   var hint = document.getElementById('overlayMoveHint');
@@ -3016,16 +3102,132 @@ function overlaySelected() {
   return state.selectedOverlay != null && !!state.overlays[state.selectedOverlay];
 }
 
-/* Drag the selected overlay: screen delta -> UV offset (negated so the overlay
- * follows the finger). Ignores rotation (mapping is exact at 0 degrees). */
+/* Drag the selected overlay to move it. Stickers (text/emoji) move by their
+ * image-local position; image overlays shift their UV offset. */
 function moveSelectedOverlay(dxPx, dyPx) {
   var ov = state.overlays[state.selectedOverlay];
   if (!ov) return;
+  if (isSticker(ov)) {
+    var d = screenDeltaToLocal(dxPx, dyPx);
+    if (d) { ov.posX = (ov.posX || 0) + d.x; ov.posY = (ov.posY || 0) + d.y; requestRender(); }
+    return;
+  }
   var ir = fullImageScreenRect();
   var z = state.zoom || 1;
   ov.offX += -(ov._sx || 1) * (dxPx / (ir.w * z));
   ov.offY += -(ov._sy || 1) * (dyPx / (ir.h * z));
   requestRender();
+}
+
+/* Convert a screen-pixel delta into an image-local delta (inverse of
+ * imageLocalToScreen's linear part), used for sticker move/position. */
+function screenDeltaToLocal(dxPx, dyPx) {
+  var v = ovView;
+  if (!v) return null;
+  var Wc = canvasWrap.clientWidth, Hc = canvasWrap.clientHeight;
+  var kx = (v.k / v.vpAspect) * v.zoom * 0.5 * Wc;   // d(screen_x)/d(p.x)
+  var ky = -(v.k) * v.zoom * 0.5 * Hc;               // d(screen_y)/d(p.y)
+  var ux = dxPx / kx, uy = dyPx / ky;                // p-space delta
+  var c = Math.cos(v.angleRad), s = Math.sin(v.angleRad);
+  // undo image rotation: local = R^-1 * p, R = mat2(c,s,-s,c) => R^-1 = [[c,s],[-s,c]]
+  return { x: c * ux + s * uy, y: -s * ux + c * uy };
+}
+
+/* ============================================================
+ * Transform gizmo for text/emoji stickers: resize + rotate frame.
+ * ============================================================ */
+var gizmoEl = document.getElementById('gizmo');
+var gizmoDrag = null;
+
+/* Screen-space corners / edge midpoints / rotate handle of the sticker quad. */
+function stickerScreenGeom(ov) {
+  if (!ovView || !ov._half) return null;
+  var hlx = ov._half[0], hly = ov._half[1];
+  var rot = (ov.rot || 0) * Math.PI / 180;
+  var cr = Math.cos(rot), sr = Math.sin(rot);
+  var px = ov.posX || 0, py = ov.posY || 0;
+  function corner(ax, ay) {
+    var lx = cr * (ax * hlx) - sr * (ay * hly);
+    var ly = sr * (ax * hlx) + cr * (ay * hly);
+    return imageLocalToScreen(px + lx, py + ly);
+  }
+  var corners = [corner(-1, 1), corner(1, 1), corner(1, -1), corner(-1, -1)];
+  var edges = [corner(0, 1), corner(1, 0), corner(0, -1), corner(-1, 0)];
+  var center = imageLocalToScreen(px, py);
+  if (!center || corners.indexOf(null) >= 0) return null;
+  var top = edges[0];
+  var ux = top.x - center.x, uy = top.y - center.y, ul = Math.hypot(ux, uy) || 1;
+  var rotate = { x: top.x + ux / ul * 30, y: top.y + uy / ul * 30 };
+  return { corners: corners, edges: edges, center: center, rotate: rotate };
+}
+
+function updateGizmo() {
+  if (!gizmoEl) return;
+  var ov = state.selectedOverlay != null ? state.overlays[state.selectedOverlay] : null;
+  if (!ov || !isSticker(ov) || state.cropping || !state.tex) {
+    gizmoEl.hidden = true;
+    if (!gizmoDrag) gizmoEl.innerHTML = '';
+    return;
+  }
+  var g = stickerScreenGeom(ov);
+  if (!g) { gizmoEl.hidden = true; return; }
+  var Wc = canvasWrap.clientWidth, Hc = canvasWrap.clientHeight;
+  gizmoEl.setAttribute('width', Wc);
+  gizmoEl.setAttribute('height', Hc);
+  gizmoEl.setAttribute('viewBox', '0 0 ' + Wc + ' ' + Hc);
+  var pts = g.corners.map(function (c) { return c.x.toFixed(1) + ',' + c.y.toFixed(1); }).join(' ');
+  var svg = '<polygon class="giz-frame" points="' + pts + '"/>';
+  svg += '<line class="giz-rot-line" x1="' + g.edges[0].x.toFixed(1) + '" y1="' + g.edges[0].y.toFixed(1) +
+         '" x2="' + g.rotate.x.toFixed(1) + '" y2="' + g.rotate.y.toFixed(1) + '"/>';
+  g.corners.concat(g.edges).forEach(function (h) {
+    svg += '<rect class="giz-handle" data-role="resize" x="' + (h.x - 5).toFixed(1) + '" y="' +
+           (h.y - 5).toFixed(1) + '" width="10" height="10"/>';
+  });
+  svg += '<circle class="giz-rot" data-role="rotate" cx="' + g.rotate.x.toFixed(1) +
+         '" cy="' + g.rotate.y.toFixed(1) + '"/>';
+  gizmoEl.innerHTML = svg;
+  gizmoEl.hidden = false;
+}
+
+if (gizmoEl) {
+  gizmoEl.addEventListener('pointerdown', function (e) {
+    var role = e.target && e.target.getAttribute ? e.target.getAttribute('data-role') : null;
+    if (!role) return;
+    var ov = state.overlays[state.selectedOverlay];
+    if (!ov) return;
+    e.preventDefault(); e.stopPropagation();
+    var rect = canvasWrap.getBoundingClientRect();
+    var center = imageLocalToScreen(ov.posX || 0, ov.posY || 0);
+    var px = e.clientX - rect.left, py = e.clientY - rect.top;
+    gizmoDrag = {
+      role: role, ov: ov, cx: center.x, cy: center.y,
+      startScale: ov.scale || 1, startDist: Math.hypot(px - center.x, py - center.y) || 1,
+      startRot: ov.rot || 0, startAngle: Math.atan2(py - center.y, px - center.x)
+    };
+    gizmoEl.setPointerCapture(e.pointerId);
+  });
+  gizmoEl.addEventListener('pointermove', function (e) {
+    if (!gizmoDrag) return;
+    var rect = canvasWrap.getBoundingClientRect();
+    var px = e.clientX - rect.left, py = e.clientY - rect.top;
+    var d = gizmoDrag;
+    if (d.role === 'resize') {
+      var dist = Math.hypot(px - d.cx, py - d.cy);
+      d.ov.scale = Math.max(0.02, Math.min(20, d.startScale * (dist / d.startDist)));
+    } else if (d.role === 'rotate') {
+      var deg = (Math.atan2(py - d.cy, px - d.cx) - d.startAngle) * 180 / Math.PI;
+      d.ov.rot = d.startRot + deg;
+    }
+    requestRender();
+  });
+  function gizmoEnd(e) {
+    if (!gizmoDrag) return;
+    gizmoDrag = null;
+    try { gizmoEl.releasePointerCapture(e.pointerId); } catch (err) {}
+    renderOverlayList(); // sync the Scale / Rotate sliders
+  }
+  gizmoEl.addEventListener('pointerup', gizmoEnd);
+  gizmoEl.addEventListener('pointercancel', gizmoEnd);
 }
 
 canvasWrap.addEventListener('pointermove', function (e) {

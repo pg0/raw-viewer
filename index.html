@@ -3217,15 +3217,20 @@ function zoomFor100() {
   var vpAspect = canvas.width / canvas.height;
   var k = Math.min(vpAspect / A, 1);           // contain scale at angle 0
   var z = state.texH / (k * canvas.height);
-  return Math.max(1, Math.min(ZOOM_MAX, z));
+  // No floor at 1: an image smaller than the viewport is genuinely below fit
+  // at 1:1, so "100%" must be able to shrink it to native pixels.
+  return Math.max(0.02, Math.min(ZOOM_MAX, z));
 }
+// Fit means zoom == 1 (either direction counts as "not fit", since 100% can be
+// below fit for small images), so the toggle/label key off distance from fit.
+function atFit() { return Math.abs(state.zoom - 1) < 0.001; }
 function update100Label() {
   var b = document.getElementById('btn100');
-  if (b) b.textContent = state.zoom > 1.001 ? 'Fit' : '100%';
+  if (b) b.textContent = atFit() ? '100%' : 'Fit';
 }
 function toggle100() {
   if (!state.tex) return;
-  if (state.zoom > 1.001) {
+  if (!atFit()) {
     resetZoom();
   } else {
     state.zoom = zoomFor100();

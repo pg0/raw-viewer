@@ -294,6 +294,9 @@
     appearance: none;
     background: transparent;
     cursor: pointer;
+    /* Let a vertical finger-drag scroll the panel instead of moving the slider;
+       only a horizontal drag adjusts the value. */
+    touch-action: pan-y;
   }
   input[type=range]::-webkit-slider-runnable-track {
     height: 4px; border-radius: 2px; background: #3c3c3c;

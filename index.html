@@ -1161,10 +1161,12 @@ var OVERLAY_FRAG = [
   'in vec2 v_uv;',
   'out vec4 frag;',
   'uniform int u_ovSticker;',
+  'uniform int u_ovFlipH;', // 1 = mirror the sticker horizontally
   'void main() {',
   '  vec2 uv;',
   '  if (u_ovSticker == 1) {',
   '    uv = v_uv;', // sticker: geometry bounds the quad, sample the full texture
+  '    if (u_ovFlipH == 1) { uv.x = 1.0 - uv.x; }',
   '  } else {',
   '    uv = u_tile == 1 ? fract(v_uv) : v_uv;',
   '    if (u_tile == 0 && (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0)) { discard; }',
@@ -1287,6 +1289,7 @@ function initGL() {
     chroma: gl.getUniformLocation(ovProg, 'u_chroma'),
     chromaThresh: gl.getUniformLocation(ovProg, 'u_chromaThresh'),
     sticker: gl.getUniformLocation(ovProg, 'u_ovSticker'),
+    flipH: gl.getUniformLocation(ovProg, 'u_ovFlipH'),
     ovRot: gl.getUniformLocation(ovProg, 'u_ovRot'),
     ovHalf: gl.getUniformLocation(ovProg, 'u_ovHalf'),
     ovPos: gl.getUniformLocation(ovProg, 'u_ovPos')
@@ -1471,6 +1474,7 @@ function drawOverlays(vpW, vpH, angleDeg, flipY, zoom, pan, crop) {
       hlx *= scS; hly *= scS;
       ov._half = [hlx, hly];
       gl.uniform1i(ovUni.sticker, 1);
+      gl.uniform1i(ovUni.flipH, ov.flipH ? 1 : 0);
       gl.uniform1f(ovUni.ovRot, (ov.rot || 0) * Math.PI / 180);
       gl.uniform2f(ovUni.ovHalf, hlx, hly);
       gl.uniform2f(ovUni.ovPos, ov.posX || 0, ov.posY || 0);
@@ -2854,13 +2858,36 @@ var EMOJIS = ['😀','😎','😍','🥳','😂','😉',
   '🌈','⚡','💥','👀','🙌','🎯','☀️','🌙',
   '💫','🍀'];
 
+// When set, picking an emoji from the palette replaces that overlay's glyph
+// (double-click an emoji in the list) instead of adding a new one.
+var emojiEditIdx = null;
+
+function pickEmoji(e) {
+  var pal = document.getElementById('emojipalette');
+  if (emojiEditIdx != null && state.overlays[emojiEditIdx]) {
+    updateOverlaySource(emojiEditIdx, renderEmojiToCanvas(e), e);
+    emojiEditIdx = null;
+  } else {
+    addEmojiOverlay(e);
+  }
+  if (pal) pal.hidden = true;
+}
+
+/* Open the emoji palette; editIdx set = swap that emoji, null = add a new one. */
+function openEmojiPicker(editIdx) {
+  emojiEditIdx = (editIdx == null) ? null : editIdx;
+  buildEmojiPalette();
+  var pal = document.getElementById('emojipalette');
+  if (pal) pal.hidden = false;
+}
+
 function buildEmojiPalette() {
   var pal = document.getElementById('emojipalette');
   if (!pal || pal.childElementCount) return;
   EMOJIS.forEach(function (e) {
     var b = document.createElement('button');
     b.type = 'button'; b.textContent = e;
-    b.addEventListener('click', function () { addEmojiOverlay(e); pal.hidden = true; });
+    b.addEventListener('click', function () { pickEmoji(e); });
     pal.appendChild(b);
   });
 }
@@ -2939,14 +2966,19 @@ function renderOverlayList() {
     top.className = 'overlay-top';
     top.title = (ov.kind === 'text')
       ? 'Click to select (drag on photo to move); double-click to edit text'
-      : 'Click to select, then drag on the photo to move';
+      : (ov.kind === 'emoji')
+        ? 'Click to select (drag on photo to move); double-click to change the emoji'
+        : 'Click to select, then drag on the photo to move';
     var handle = document.createElement('span');
     handle.className = 'overlay-drag';
     handle.textContent = '⠿'; // braille dots = drag grip
     handle.title = 'Drag to reorder (top of list = bottom layer)';
-    handle.draggable = true;
+    // The whole row is the reorder handle (grabbing near the thumbnail must not
+    // start a native image copy-drag), so disable the thumbnail's default drag.
+    item.draggable = true;
     var img = document.createElement('img');
     img.className = 'overlay-thumb';
+    img.draggable = false;
     img.src = ov.thumb;
     var name = document.createElement('span');
     name.className = 'overlay-name';
@@ -2961,16 +2993,19 @@ function renderOverlayList() {
     top.addEventListener('click', function () { selectOverlay(idx); });
     if (ov.kind === 'text') {
       top.addEventListener('dblclick', function () { openTextModal(idx); });
+    } else if (ov.kind === 'emoji') {
+      top.addEventListener('dblclick', function () { openEmojiPicker(idx); });
     }
     top.appendChild(handle); top.appendChild(img); top.appendChild(name); top.appendChild(rm);
 
-    // Drag-and-drop layer reorder (via the grip handle).
-    handle.addEventListener('dragstart', function (e) {
+    // Drag-and-drop layer reorder (grab anywhere on the row).
+    item.addEventListener('dragstart', function (e) {
       e.dataTransfer.setData('text/plain', String(idx));
+      e.dataTransfer.setData('application/x-overlay-reorder', String(idx));
       e.dataTransfer.effectAllowed = 'move';
       item.classList.add('dragging');
     });
-    handle.addEventListener('dragend', function () {
+    item.addEventListener('dragend', function () {
       item.classList.remove('dragging');
       Array.prototype.forEach.call(overlayList.children, function (c) { c.classList.remove('drop-target'); });
     });
@@ -3037,6 +3072,13 @@ function renderOverlayList() {
         function (v) { return Math.round(v) + '°'; },
         function (v) { ov.rot = v; });
       item.appendChild(rotRow);
+      var mirLbl = document.createElement('label');
+      mirLbl.className = 'overlay-tile';
+      var mirChk = document.createElement('input');
+      mirChk.type = 'checkbox'; mirChk.checked = !!ov.flipH;
+      mirChk.addEventListener('change', function () { ov.flipH = mirChk.checked; requestRender(); });
+      mirLbl.appendChild(mirChk); mirLbl.appendChild(document.createTextNode(' Mirror'));
+      item.appendChild(mirLbl);
     } else {
       // Optional alpha (chroma) color for image overlays.
       var chromaHead = document.createElement('div');
@@ -3086,6 +3128,7 @@ document.getElementById('ovApplyFx').addEventListener('change', function () {
   requestRender();
 });
 document.getElementById('btnAddEmoji').addEventListener('click', function () {
+  emojiEditIdx = null; // the + Emoji button always adds a new one
   buildEmojiPalette();
   var pal = document.getElementById('emojipalette');
   pal.hidden = !pal.hidden;
@@ -3258,6 +3301,21 @@ function pointInStickerScreen(ov, sx, sy) {
   return inside;
 }
 
+/* Topmost sticker (text/emoji) under a screen point, or null. */
+function stickerAtPoint(sx, sy) {
+  for (var i = state.overlays.length - 1; i >= 0; i--) {
+    if (isSticker(state.overlays[i]) && pointInStickerScreen(state.overlays[i], sx, sy)) return i;
+  }
+  return null;
+}
+function forceSelectSticker(idx) {
+  state.selectedOverlay = idx;
+  renderOverlayList();
+  requestRender();
+}
+// Manual double-tap detection for touch (native dblclick is unreliable there).
+var lastCanvasTap = 0, lastCanvasTapX = 0, lastCanvasTapY = 0;
+
 function twoPointers() {
   var it = activePointers.values();
   return [it.next().value, it.next().value];
@@ -3279,6 +3337,16 @@ canvasWrap.addEventListener('pointerdown', function (e) {
   canvasWrap.setPointerCapture(e.pointerId);
   if (activePointers.size === 1) tapInfo = { x: e.clientX, y: e.clientY, moved: false };
   else tapInfo = null;
+  // Touch double-tap on a sticker selects it (mouse uses native dblclick below).
+  if (activePointers.size === 1 && e.pointerType !== 'mouse') {
+    var nowT = Date.now();
+    if (nowT - lastCanvasTap < 320 && Math.abs(e.clientX - lastCanvasTapX) < 24 && Math.abs(e.clientY - lastCanvasTapY) < 24) {
+      var rectD = canvasWrap.getBoundingClientRect();
+      var sIdx = stickerAtPoint(e.clientX - rectD.left, e.clientY - rectD.top);
+      if (sIdx != null) { forceSelectSticker(sIdx); tapInfo = null; lastCanvasTap = 0; return; }
+    }
+    lastCanvasTap = nowT; lastCanvasTapX = e.clientX; lastCanvasTapY = e.clientY;
+  }
   if (activePointers.size >= 2) {
     startPinch();
     canvasWrap.classList.remove('panning');
@@ -3489,8 +3557,13 @@ function releasePointer(e) {
 }
 canvasWrap.addEventListener('pointerup', releasePointer);
 canvasWrap.addEventListener('pointercancel', releasePointer);
-canvasWrap.addEventListener('dblclick', function () {
-  if (state.tex && !state.cropping) resetZoom();
+canvasWrap.addEventListener('dblclick', function (e) {
+  if (!state.tex || state.cropping) return;
+  // Double-click a sticker to select it; otherwise reset the zoom to fit.
+  var rect = canvasWrap.getBoundingClientRect();
+  var idx = stickerAtPoint(e.clientX - rect.left, e.clientY - rect.top);
+  if (idx != null) { forceSelectSticker(idx); return; }
+  resetZoom();
 });
 
 /* ============================================================

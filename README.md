@@ -6,7 +6,7 @@ By **Patrick Gawron** ([pg0](https://github.com/pg0)) - <https://github.com/pg0/
 Live demo: <https://pg0.github.io/raw-viewer/>
 
 ## Features
-- RAW decode (LibRaw + dcraw), plus JPEG / PNG / WebP / BMP / GIF / HEIC
+- RAW decode (LibRaw + dcraw), plus JPEG / PNG / WebP / BMP / GIF / HEIC / TIFF (uncompressed, LZW, PackBits, ZIP; 8- and 16-bit, via UTIF)
 - Real-time WebGL2 adjustments: exposure, contrast, highlights/shadows, white balance, saturation, vibrance, and film grain - additive, luma-weighted, band-limited (Perlin gradient noise + particle shaping, same math as the FilmGrain DCTL), image-anchored so it bakes into the export. Grain controls are minimal: intensity, film-stock type (Super 8 / 16mm / 35mm / 65mm), and size
 - Two `.cube` LUT slots (converter + style) with per-slot intensity
 - Overlays: stack images, SVGs, text, or emoji (grain, film strip, light leaks, dust, stickers, captions) blended over the photo. Add via the panel buttons (+ Image / + Text / + Emoji) or by dropping an image onto the panel. Per overlay: blend mode (Normal / Screen / Multiply / Add), opacity, keep-aspect (contain-fit vs stretch), tiling, scale/zoom (0.1x - 12x), X/Y offset, and an optional alpha (chroma-key) colour to knock a colour out to transparent. Select an overlay and drag it on the photo to reposition it, drag the grip handle in the list to reorder layers, and double-click a text overlay to edit it. An "Apply effects to overlays" toggle at the top of the panel grades the overlays together with the photo (LUT, grain, exposure and the rest land on the overlays too). Overlays track crop/rotation and bake into the export
@@ -47,6 +47,8 @@ For a RAW file the app tries, in order:
 | `index.html` | the whole app (UI + WebGL2 shader pipeline) |
 | `dcraw.js` | dcraw 9.26 asm.js decoder (offline fallback) |
 | `libheif.js` | HEIC/HEIF decoding |
+| `utif.js` | TIFF/TIF decoding (UTIF, MIT) |
+| `pako_inflate.min.js` | inflate for ZIP-compressed TIFFs (pako, MIT) |
 | `libraw/` | LibRaw-Wasm 1.6.0 (index.js, worker.js, libraw.js, libraw.wasm) |
 | `coi-serviceworker.js` | cross-origin isolation shim for static hosts (MIT, G. Zuidhof) |
 | `serve.py` / `serve.cmd` | dev server with COOP/COEP headers |
@@ -55,5 +57,7 @@ For a RAW file the app tries, in order:
 - [LibRaw](https://www.libraw.org/) via [libraw-wasm](https://github.com/ybouane/libraw-wasm) (LibRaw 0.22.1)
 - [dcraw](https://www.dechifro.org/dcraw/) 9.26 (Dave Coffin) via the `dcraw` npm asm.js build
 - [libheif](https://github.com/strukturag/libheif)
+- [UTIF.js](https://github.com/photopea/UTIF.js) - MIT, Ivan Kutskir (TIFF decoding)
+- [pako](https://github.com/nodeca/pako) - MIT AND Zlib (inflate for ZIP-compressed TIFFs)
 - [coi-serviceworker](https://github.com/gzuidhof/coi-serviceworker) - MIT, Guido Zuidhof
 - Film grain approach inspired by [filmgrainer](https://github.com/larspontoppidan/filmgrainer)

@@ -516,7 +516,7 @@
         <h2>Drop an image file here</h2>
         <p>or</p>
         <button id="btnOpen2" class="primary">Choose file</button>
-        <p>RAW (ARW, CR2, NEF, DNG, RAF ...), JPEG, PNG, WebP, HEIC - or a .cube LUT</p>
+        <p>RAW (ARW, CR2, NEF, DNG, RAF ...), JPEG, PNG, WebP, HEIC, TIFF - or a .cube LUT</p>
       </div>
       <div id="zoomchip" hidden></div>
       <button id="btn100" hidden title="Toggle 100% (actual pixels) vs fit">100%</button>
@@ -552,7 +552,7 @@
       <div id="glerror" hidden>WebGL2 is not available in this browser - the viewer cannot render.</div>
     </div>
     <div id="footer">
-      Wheel: zoom &#183; Drag: pan &#183; Double-click: fit &#183; RAW via LibRaw (run serve.cmd or use the live site) covers 1000+ modern bodies - Sony ARW incl. ZV-E1, Canon CR2/CR3, Nikon NEF, DNG, RAF, ORF, RW2 and more; dcraw decodes older bodies offline (file://). Plus JPEG, PNG, WebP, HEIC and .cube LUTs.
+      Wheel: zoom &#183; Drag: pan &#183; Double-click: fit &#183; RAW via LibRaw (run serve.cmd or use the live site) covers 1000+ modern bodies - Sony ARW incl. ZV-E1, Canon CR2/CR3, Nikon NEF, DNG, RAF, ORF, RW2 and more; dcraw decodes older bodies offline (file://). Plus JPEG, PNG, WebP, HEIC, TIFF and .cube LUTs.
     </div>
   </main>
   <aside id="sidebar">
@@ -666,14 +666,36 @@
   </div>
 </div>
 <input type="file" id="fileinput" hidden
-  accept=".arw,.cr2,.cr3,.nef,.nrw,.dng,.raf,.orf,.rw2,.raw,.pef,.srw,.srf,.sr2,.kdc,.dcr,.mrw,.3fr,.erf,.mef,.mos,.x3f,.gpr,.rwl,.iiq,.cap,.fff,.arq,.jpg,.jpeg,.png,.webp,.bmp,.gif,.heic,.heif">
+  accept=".arw,.cr2,.cr3,.nef,.nrw,.dng,.raf,.orf,.rw2,.raw,.pef,.srw,.srf,.sr2,.kdc,.dcr,.mrw,.3fr,.erf,.mef,.mos,.x3f,.gpr,.rwl,.iiq,.cap,.fff,.arq,.jpg,.jpeg,.png,.webp,.bmp,.gif,.heic,.heif,.tif,.tiff">
 <input type="file" id="lutinput" hidden accept=".cube">
 <input type="file" id="overlayinput" hidden accept="image/*,.svg,image/svg+xml">
 
 <script src="dcraw.js"></script>
 <script src="libheif.js"></script>
+<!-- TIFF decode: pako (inflate, for ZIP-compressed TIFFs) must load before UTIF,
+     which reads self.pako at init. UTIF bundles its own LZW/PackBits/JPEG paths. -->
+<script src="pako_inflate.min.js"></script>
+<script src="utif.js"></script>
 <script>
 'use strict';
+
+/* TIFF/TIF decode via the locally bundled UTIF.js (pako handles ZIP compression).
+ * Returns { width, height, rgba: Uint8ClampedArray } - display-referred 8-bit. */
+function decodeTIFF(uint8Array) {
+  if (!window.UTIF) throw new Error('utif.js not loaded');
+  var ifds = UTIF.decode(uint8Array.buffer);
+  if (!ifds || ifds.length === 0) throw new Error('No images found in TIFF data');
+  // Pick the largest sub-image (some TIFFs embed thumbnails as extra IFDs).
+  var best = ifds[0], bestPx = 0;
+  for (var i = 0; i < ifds.length; i++) {
+    UTIF.decodeImage(uint8Array.buffer, ifds[i], ifds);
+    var px = (ifds[i].width || 0) * (ifds[i].height || 0);
+    if (px > bestPx && ifds[i].data) { bestPx = px; best = ifds[i]; }
+  }
+  if (!best.data) throw new Error('TIFF decode produced no pixels');
+  var rgba = UTIF.toRGBA8(best); // Uint8Array, display-referred sRGB-ish
+  return { width: best.width, height: best.height, rgba: new Uint8ClampedArray(rgba.buffer) };
+}
 
 /* HEIC/HEIF decode via the locally bundled libheif.js (wasm embedded).
  * Returns { width, height, rgba: Uint8ClampedArray }. */
@@ -2235,7 +2257,7 @@ var SRGB_TO_LIN = (function () {
 function dispatchFile(file) {
   // Dropping a .cube always loads it into the Style slot (slot 1).
   if (/\.cube$/i.test(file.name)) { loadLUTFile(file, 1); return; }
-  if (/\.(jpe?g|png|webp|bmp|gif|heic|heif)$/i.test(file.name)) { loadRasterImage(file); return; }
+  if (/\.(jpe?g|png|webp|bmp|gif|heic|heif|tiff?)$/i.test(file.name)) { loadRasterImage(file); return; }
   loadFile(file);
 }
 
@@ -2248,8 +2270,9 @@ async function loadRasterImage(file) {
   if (state.decoding || state.busy) { toast('Please wait - a decode is still running.'); return; }
   if (!gl) { toast('WebGL2 not available - cannot render.'); return; }
   var isHeic = /\.(heic|heif)$/i.test(file.name);
+  var isTiff = /\.(tiff?)$/i.test(file.name);
   dropzone.classList.add('hidden');
-  showOverlay(isHeic ? 'Decoding HEIC...' : 'Loading image...');
+  showOverlay(isHeic ? 'Decoding HEIC...' : isTiff ? 'Decoding TIFF...' : 'Loading image...');
   await nextFrame();
 
   // Produce a drawable source (ImageBitmap or canvas) plus its true dimensions.
@@ -2263,6 +2286,15 @@ async function loadRasterImage(file) {
       hc.getContext('2d').putImageData(new ImageData(heic.rgba, heic.width, heic.height), 0, 0);
       source = hc; srcW = heic.width; srcH = heic.height;
       typeLabel = 'HEIC';
+    } else if (isTiff) {
+      // Browsers can't decode TIFF natively; use the bundled UTIF decoder.
+      var tbytes = new Uint8Array(await file.arrayBuffer());
+      var tif = decodeTIFF(tbytes); // { width, height, rgba }
+      var tc = document.createElement('canvas');
+      tc.width = tif.width; tc.height = tif.height;
+      tc.getContext('2d').putImageData(new ImageData(tif.rgba, tif.width, tif.height), 0, 0);
+      source = tc; srcW = tif.width; srcH = tif.height;
+      typeLabel = 'TIFF';
     } else {
       var bmp = await createImageBitmap(file);
       source = bmp; srcW = bmp.width; srcH = bmp.height;

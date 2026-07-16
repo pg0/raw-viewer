@@ -313,6 +313,7 @@
     margin-bottom: 1px;
   }
   .slider-head .val { color: #7fb3e6; font-variant-numeric: tabular-nums; }
+  select.grain-type { width: 100%; background: #333; color: #ddd; border: 1px solid #444; border-radius: 5px; padding: 4px 6px; font-size: 11px; font-family: inherit; cursor: pointer; }
   input[type=range] {
     width: 100%;
     height: 18px;
@@ -885,7 +886,17 @@ var state = {
   luts: [null, null],       // slot 0 = converter, slot 1 = style; each { name, size, is3D, tex }
   lutIntensity: [1, 1],
   overlays: [],             // [{ name, tex, w, h, mode, opacity, tile }] composited over the photo
-  applyFx: false            // grade (LUT/grain/etc.) the overlays together with the photo
+  applyFx: false,           // grade (LUT/grain/etc.) the overlays together with the photo
+  grainStock: '35mm'        // film-stock preset: sets grain size/intensity character
+};
+
+// Film-stock grain presets: [ sizeMultiplier, intensityMultiplier ].
+// Coarser, heavier stocks up top; near-clean large formats at the bottom.
+var GRAIN_STOCK = {
+  super8: [2.6, 1.6],
+  '16mm': [1.7, 1.2],
+  '35mm': [1.0, 0.9],
+  '65mm': [0.6, 0.6]
 };
 
 var LUT_UNITS = null; // filled in initGL: per-slot texture unit numbers + dummy textures
@@ -909,9 +920,9 @@ var SLIDER_GROUPS = [
   { group: 'Effects', items: [
     { id: 'gamma',    label: 'Gamma',    min: 0.3, max: 2.5, step: 0.01, def: 1 },
     { id: 'vignette', label: 'Vignette', min: -1,  max: 1,   step: 0.01, def: 0 },
-    { id: 'grain',     label: 'Grain',      min: 0,   max: 0.2, step: 0.005, def: 0 },
-    { id: 'grainSize', label: 'Grain size', min: 1,   max: 8,   step: 0.1,  def: 2.5,
-      fmt: function (v) { return v.toFixed(1) + ' px'; } }
+    { id: 'grain',     label: 'Grain',      min: 0,   max: 1,   step: 0.01, def: 0 },
+    { id: 'grainSize', label: 'Grain size', min: 0.3, max: 8,   step: 0.05, def: 2.0,
+      fmt: function (v) { return v.toFixed(2) + ' px'; } }
   ]}
 ];
 
@@ -948,13 +959,14 @@ var VERT_SRC = [
 var FRAG_SRC = [
   '#version 300 es',
   'precision highp float;',
+  'precision highp int;',   // the film-grain hash needs full 32-bit uint math
   'in vec2 v_uv;',
   'in vec2 v_local;',
   'out vec4 fragColor;',
   'uniform sampler2D u_image;',
   'uniform float u_exposure, u_contrast, u_highlights, u_shadows, u_whites, u_blacks;',
   'uniform float u_temperature, u_tint, u_vibrance, u_saturation, u_gamma, u_vignette;',
-  'uniform float u_grain, u_grainSize;',
+  'uniform float u_grain, u_grainSize, u_grainStockSize, u_grainStockInt;',
   'uniform int u_fromSrgb;', // 1 = input is an sRGB scene buffer (post pass); re-linearize before grading
   // Two LUT slots: 0 = converter, 1 = style. Each can be 3D or 1D.
   'uniform mediump sampler3D u_lut0_3d;',
@@ -969,34 +981,55 @@ var FRAG_SRC = [
   'uniform float u_lut1Int;',
   'const vec3 LUMA = vec3(0.2126, 0.7152, 0.0722);',
   '',
-  'float hash(vec2 p) {',
-  '  return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453);',
+  // ---- Film grain: additive, luma-weighted, band-limited noise (same math as
+  //      the FilmGrain DCTL / WebGL demo). Bit-mixing integer hash + Perlin
+  //      gradient noise + power-law particle shaping -> discrete silver grains.
+  'float smooth1(float t) { return t * t * (3.0 - 2.0 * t); }',
+  // integer-quality 2D hash -> [0,1). Decorrelated on the exact pixel lattice
+  // (float fract-of-product hashes weave a faint cross-hatch on flat midtones).
+  'float hashI(float x, float y, float s) {',
+  '  uint h = uint(int(floor(x))) * 0x9E3779B1u',
+  '         ^ uint(int(floor(y))) * 0x85EBCA77u',
+  '         ^ uint(int(floor(s))) * 0xC2B2AE3Du;',
+  '  h ^= h >> 16; h *= 0x7FEB352Du;',
+  '  h ^= h >> 15; h *= 0x846CA68Bu;',
+  '  h ^= h >> 16;',
+  '  return float(h & 0x00FFFFFFu) / 16777216.0;',
   '}',
-  '',
-  // Standard-normal sample for one grain cell (Box-Muller on two decorrelated hashes)
-  'float gaussCell(vec2 c) {',
-  '  float u1 = max(hash(c), 1e-6);',
-  '  float u2 = hash(c + vec2(37.17, 11.31));',
-  '  float g = sqrt(-2.0 * log(u1)) * cos(6.2831853 * u2);',
-  '  return clamp(g, -2.5, 2.5);',
+  // quintic fade (Perlin) - C2 continuous across cells, no lattice creases
+  'float fade5(float t) { return t * t * t * (t * (t * 6.0 - 15.0) + 10.0); }',
+  // hashed gradient direction at a lattice corner, dotted with the sample offset
+  'float gdot(float cx, float cy, float dx, float dy, float s) {',
+  '  float ang = hashI(cx, cy, s) * 6.2831853;',
+  '  return cos(ang) * dx + sin(ang) * dy;',
   '}',
-  // Smooth (bilinear + smoothstep) gaussian value noise so grain has a real size',
-  'float grainNoise(vec2 gc) {',
-  '  vec2 ip = floor(gc);',
-  '  vec2 fp = fract(gc);',
-  '  fp = fp * fp * (3.0 - 2.0 * fp);',
-  '  float n00 = gaussCell(ip);',
-  '  float n10 = gaussCell(ip + vec2(1.0, 0.0));',
-  '  float n01 = gaussCell(ip + vec2(0.0, 1.0));',
-  '  float n11 = gaussCell(ip + vec2(1.0, 1.0));',
-  '  return mix(mix(n00, n10, fp.x), mix(n01, n11, fp.x), fp.y);',
+  // 2D gradient (Perlin) noise ~[-1,1]: zero-mean, band-limited at the lattice
+  // frequency, so a lattice of N px produces actual N-px granularity.
+  'float gnoise(float x, float y, float s) {',
+  '  float ix = floor(x), iy = floor(y), fx = x - ix, fy = y - iy;',
+  '  float a = gdot(ix,       iy,       fx,       fy,       s);',
+  '  float b = gdot(ix + 1.0, iy,       fx - 1.0, fy,       s);',
+  '  float c = gdot(ix,       iy + 1.0, fx,       fy - 1.0, s);',
+  '  float d = gdot(ix + 1.0, iy + 1.0, fx - 1.0, fy - 1.0, s);',
+  '  float ux = fade5(fx), uy = fade5(fy);',
+  '  return mix(mix(a, b, ux), mix(c, d, ux), uy) * 1.6;',
   '}',
-  // filmgrainer development curve: power peaks in the upper mids, tapers toward',
-  // shadows (0.15) and highlights (0.25)',
-  'float grainPower(float lm) {',
-  '  if (lm < 0.63) return mix(0.15, 0.5, lm / 0.63);',
-  '  if (lm < 0.78) return 0.5;',
-  '  return mix(0.5, 0.25, (lm - 0.78) / 0.22);',
+  'vec2 rot2(float x, float y, float a) { float s = sin(a), c = cos(a); return vec2(x * c - y * s, x * s + y * c); }',
+  // signed grain ~[-1,1]: 3 rotated gradient-noise octaves (clumps) + per-pixel
+  // detail, then a signed power law raises kurtosis -> punchy silver particles.
+  'float grainField(float x, float y, float px, float py, float s, float rough, float soft) {',
+  '  vec2 a = rot2(x, y, 0.7), b = rot2(x, y, 2.4), c = rot2(x, y, 3.9);',
+  '  float n = gnoise(a.x, a.y, s)',
+  '          + gnoise(b.x * 2.1, b.y * 2.1, s + 31.0) * 0.55',
+  '          + gnoise(c.x * 0.53, c.y * 0.53, s + 71.0) * 0.35;',
+  '  n *= 0.84;',
+  '  float fine = hashI(px, py, s * 1.7) * 2.0 - 1.0;',
+  '  float g = mix(n, fine, rough * rough);',
+  '  float shape = mix(0.55, 1.0, soft);',
+  '  g = sign(g) * pow(abs(g), shape);',
+  '  float lo = gnoise(x * 0.35, y * 0.35, s - 9.1);',
+  '  g = mix(g, lo, soft * 0.35);',
+  '  return g;',
   '}',
   '',
   // Apply one LUT slot. Display-referred sRGB input, half-texel corrected.
@@ -1088,18 +1121,25 @@ var FRAG_SRC = [
   '  float fall = smoothstep(0.4, 1.5, d);',
   '  rgb *= exp2(u_vignette * 1.5 * fall);',
   '',
-  '  // 8b. Film grain: gaussian, image-anchored (zooms and pans with the photo),',
-  '  //      size- and luminance-shaped per the filmgrainer development curve.',
-  '  //      Signal-COUPLED (multiplicative) so grain lives inside the image',
-  '  //      rather than sitting on top as a flat layer, plus a small additive',
-  '  //      floor so shadows still carry grain the way real film does.',
+  '  // 8b. Film grain: additive, luma-weighted, band-limited (FilmGrain math).',
+  '  //      Image-anchored (samples texture pixels) so it zooms/pans with the',
+  '  //      photo and bakes into the export. A mid-peaked density gate keeps',
+  '  //      pure black clean and clipped white silky. Softness / roughness / luma',
+  '  //      response are fixed to the film-stock defaults; only intensity, size',
+  '  //      and stock type are exposed.',
   '  if (u_grain > 0.0) {',
   '    vec2 gpix = v_uv * vec2(textureSize(u_image, 0));',
-  '    float g = grainNoise(gpix / max(u_grainSize, 0.5));',
-  '    float lm = dot(rgb, LUMA);',
-  '    float amt = u_grain * grainPower(lm);',
-  '    rgb *= 1.0 + g * amt * 0.55;',
-  '    rgb += g * amt * 0.05;',
+  '    float gsize = max(0.30, u_grainSize * u_grainStockSize);',
+  '    float fx = gpix.x / gsize, fy = gpix.y / gsize;',
+  '    float L = clamp(dot(rgb, LUMA), 0.0, 1.0);',
+  '    float wSh = smooth1(clamp(1.0 - L * 2.0, 0.0, 1.0));',
+  '    float wHi = smooth1(clamp((L - 0.5) * 2.0, 0.0, 1.0));',
+  '    float wMi = smooth1(clamp(1.0 - abs(L - 0.45) * 2.2, 0.0, 1.0));',
+  '    float gate = pow(clamp(4.0 * L * (1.0 - L), 0.0, 1.0), 0.35);',
+  '    float lumaAmt = (wSh + wMi + 0.55 * wHi) * gate;',  // shadows/mid = 1.0, highlights = 0.55
+  '    float amt = u_grain * u_grainStockInt * lumaAmt * 0.15;',
+  '    float g = grainField(fx, fy, gpix.x, gpix.y, 1.0, 0.35, 0.25);',  // seed, roughness, softness
+  '    rgb += g * amt;',
   '  }',
   '',
   '  // 9. Final clamp',
@@ -1235,6 +1275,8 @@ function initGL() {
   for (var i = 0; i < PARAM_IDS.length; i++) {
     uni[PARAM_IDS[i]] = gl.getUniformLocation(prog, 'u_' + PARAM_IDS[i]);
   }
+  uni.grainStockSize = gl.getUniformLocation(prog, 'u_grainStockSize');
+  uni.grainStockInt = gl.getUniformLocation(prog, 'u_grainStockInt');
   gl.uniform1i(uni.image, 0);
   // Texture units: 0 image, 1/2 = slot0 3d/1d, 3/4 = slot1 3d/1d
   gl.uniform1i(uni.lut[0].s3d, 1);
@@ -1378,6 +1420,9 @@ function drawQuad(vpW, vpH, angleDeg, flipY, letterbox, zoom, pan, crop, effects
     var pv = (!effects || (grp && !groupEnabled[grp])) ? PARAM_DEF[pid] : state.params[pid];
     gl.uniform1f(uni[pid], pv);
   }
+  var stock = GRAIN_STOCK[state.grainStock] || GRAIN_STOCK['35mm'];
+  gl.uniform1f(uni.grainStockSize, stock[0]);
+  gl.uniform1f(uni.grainStockInt, stock[1]);
   var lutOn = effects && groupEnabled.LUT;
   for (var s = 0; s < 2; s++) {
     var lut = state.luts[s];
@@ -1571,6 +1616,9 @@ function drawEffectsPost(vpW, vpH, scenePassFlipY, srcTex) {
     var pv = (grp && !groupEnabled[grp]) ? PARAM_DEF[pid] : state.params[pid];
     gl.uniform1f(uni[pid], pv);
   }
+  var stock = GRAIN_STOCK[state.grainStock] || GRAIN_STOCK['35mm'];
+  gl.uniform1f(uni.grainStockSize, stock[0]);
+  gl.uniform1f(uni.grainStockInt, stock[1]);
   var lutOn = groupEnabled.LUT;
   for (var s = 0; s < 2; s++) {
     var lut = state.luts[s];
@@ -1895,6 +1943,42 @@ function buildSliders() {
 }
 buildSliders();
 
+// Film-stock "Type" dropdown for grain. The minimal grain control set is just
+// intensity (Grain) + type (this) + size; softness/roughness/luma-response are
+// fixed to the stock defaults inside the shader.
+var grainStockSelect = null;
+(function () {
+  var sizeRow = sliderInputs.grainSize && sliderInputs.grainSize.input.closest('.slider-row');
+  if (!sizeRow) return;
+  var row = document.createElement('div');
+  row.className = 'slider-row';
+  var head = document.createElement('div');
+  head.className = 'slider-head';
+  var lbl = document.createElement('span');
+  lbl.textContent = 'Type';
+  head.appendChild(lbl);
+  row.appendChild(head);
+  var sel = document.createElement('select');
+  sel.className = 'grain-type';
+  [['super8', 'Super 8 - coarse, heavy'],
+   ['16mm', '16mm - visible'],
+   ['35mm', '35mm - fine'],
+   ['65mm', '65mm - near-clean']].forEach(function (o) {
+    var opt = document.createElement('option');
+    opt.value = o[0]; opt.textContent = o[1];
+    sel.appendChild(opt);
+  });
+  sel.value = state.grainStock;
+  sel.addEventListener('change', function () {
+    state.grainStock = sel.value;
+    requestRender();
+  });
+  row.appendChild(sel);
+  // Order in the Effects panel: Grain (intensity), Type, Grain size.
+  sizeRow.parentNode.insertBefore(row, sizeRow);
+  grainStockSelect = sel;
+})();
+
 // LUT panel is static HTML; give its header the same eye toggle.
 (function () {
   var sum = document.querySelector('#lutpanel > summary');
@@ -1914,6 +1998,8 @@ function resetAllSliders() {
     state.params[id] = s.def;
     s.refresh();
   });
+  state.grainStock = '35mm';
+  if (grainStockSelect) grainStockSelect.value = '35mm';
   // Reset all also clears rotation, crop, zoom and pan.
   state.angleDeg = 0;
   state.zoom = 1;

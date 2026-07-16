@@ -909,16 +909,19 @@ var state = {
   lutIntensity: [1, 1],
   overlays: [],             // [{ name, tex, w, h, mode, opacity, tile }] composited over the photo
   applyFx: false,           // grade (LUT/grain/etc.) the overlays together with the photo
-  grainStock: '35mm'        // film-stock preset: sets grain size/intensity character
+  grainStock: 'custom'      // selected film-stock preset (writes intensity/size); 'custom' = free
 };
 
-// Film-stock grain presets: [ sizeMultiplier, intensityMultiplier ].
-// Coarser, heavier stocks up top; near-clean large formats at the bottom.
-var GRAIN_STOCK = {
-  super8: [2.6, 1.6],
-  '16mm': [1.7, 1.2],
-  '35mm': [1.0, 0.9],
-  '65mm': [0.6, 0.6]
+// Film-stock presets: picking one WRITES the Grain (intensity) + Grain size
+// sliders to these values (WYSIWYG - the numbers you see are what applies; no
+// hidden multiplier). Values = 35mm base (0.20 / 1.6 px at 1080p) times each
+// format's real enlargement factor. 'custom' leaves the sliders untouched.
+// [ intensity, size ]. Same table as the FilmGrain web tool / DCTL research.
+var GRAIN_STOCK_FILL = {
+  super8: [0.64, 6.1],
+  '16mm': [0.40, 3.44],
+  '35mm': [0.20, 1.6],
+  '65mm': [0.09, 0.8]
 };
 
 var LUT_UNITS = null; // filled in initGL: per-slot texture unit numbers + dummy textures
@@ -943,7 +946,7 @@ var SLIDER_GROUPS = [
     { id: 'gamma',    label: 'Gamma',    min: 0.3, max: 2.5, step: 0.01, def: 1 },
     { id: 'vignette', label: 'Vignette', min: -1,  max: 1,   step: 0.01, def: 0 },
     { id: 'grain',     label: 'Grain',      min: 0,   max: 1,   step: 0.01, def: 0 },
-    { id: 'grainSize', label: 'Grain size', min: 0.3, max: 8,   step: 0.05, def: 2.0,
+    { id: 'grainSize', label: 'Grain size', min: 0.3, max: 8,   step: 0.01, def: 1.6,
       fmt: function (v) { return v.toFixed(2) + ' px'; } }
   ]}
 ];
@@ -988,7 +991,7 @@ var FRAG_SRC = [
   'uniform sampler2D u_image;',
   'uniform float u_exposure, u_contrast, u_highlights, u_shadows, u_whites, u_blacks;',
   'uniform float u_temperature, u_tint, u_vibrance, u_saturation, u_gamma, u_vignette;',
-  'uniform float u_grain, u_grainSize, u_grainStockSize, u_grainStockInt;',
+  'uniform float u_grain, u_grainSize;',
   'uniform int u_fromSrgb;', // 1 = input is an sRGB scene buffer (post pass); re-linearize before grading
   // Two LUT slots: 0 = converter, 1 = style. Each can be 3D or 1D.
   'uniform mediump sampler3D u_lut0_3d;',
@@ -1148,10 +1151,14 @@ var FRAG_SRC = [
   '  //      photo and bakes into the export. A mid-peaked density gate keeps',
   '  //      pure black clean and clipped white silky. Softness / roughness / luma',
   '  //      response are fixed to the film-stock defaults; only intensity, size',
-  '  //      and stock type are exposed.',
+  '  //      and stock type are exposed (the stock writes the intensity/size).',
   '  if (u_grain > 0.0) {',
-  '    vec2 gpix = v_uv * vec2(textureSize(u_image, 0));',
-  '    float gsize = max(0.30, u_grainSize * u_grainStockSize);',
+  '    vec2 texSz = vec2(textureSize(u_image, 0));',
+  '    vec2 gpix = v_uv * texSz;',
+  '    // Resolution normalization: grain px scales with image height / 1080p, so',
+  '    // the look is identical at any resolution (matches the FilmGrain DCTL).',
+  '    float resScale = texSz.y / 1080.0;',
+  '    float gsize = max(0.30, u_grainSize * resScale);',
   '    float fx = gpix.x / gsize, fy = gpix.y / gsize;',
   '    float L = clamp(dot(rgb, LUMA), 0.0, 1.0);',
   '    float wSh = smooth1(clamp(1.0 - L * 2.0, 0.0, 1.0));',
@@ -1159,7 +1166,7 @@ var FRAG_SRC = [
   '    float wMi = smooth1(clamp(1.0 - abs(L - 0.45) * 2.2, 0.0, 1.0));',
   '    float gate = pow(clamp(4.0 * L * (1.0 - L), 0.0, 1.0), 0.35);',
   '    float lumaAmt = (wSh + wMi + 0.55 * wHi) * gate;',  // shadows/mid = 1.0, highlights = 0.55
-  '    float amt = u_grain * u_grainStockInt * lumaAmt * 0.15;',
+  '    float amt = u_grain * lumaAmt * 0.15;',
   '    float g = grainField(fx, fy, gpix.x, gpix.y, 1.0, 0.35, 0.25);',  // seed, roughness, softness
   '    rgb += g * amt;',
   '  }',
@@ -1297,8 +1304,6 @@ function initGL() {
   for (var i = 0; i < PARAM_IDS.length; i++) {
     uni[PARAM_IDS[i]] = gl.getUniformLocation(prog, 'u_' + PARAM_IDS[i]);
   }
-  uni.grainStockSize = gl.getUniformLocation(prog, 'u_grainStockSize');
-  uni.grainStockInt = gl.getUniformLocation(prog, 'u_grainStockInt');
   gl.uniform1i(uni.image, 0);
   // Texture units: 0 image, 1/2 = slot0 3d/1d, 3/4 = slot1 3d/1d
   gl.uniform1i(uni.lut[0].s3d, 1);
@@ -1442,9 +1447,6 @@ function drawQuad(vpW, vpH, angleDeg, flipY, letterbox, zoom, pan, crop, effects
     var pv = (!effects || (grp && !groupEnabled[grp])) ? PARAM_DEF[pid] : state.params[pid];
     gl.uniform1f(uni[pid], pv);
   }
-  var stock = GRAIN_STOCK[state.grainStock] || GRAIN_STOCK['35mm'];
-  gl.uniform1f(uni.grainStockSize, stock[0]);
-  gl.uniform1f(uni.grainStockInt, stock[1]);
   var lutOn = effects && groupEnabled.LUT;
   for (var s = 0; s < 2; s++) {
     var lut = state.luts[s];
@@ -1638,9 +1640,6 @@ function drawEffectsPost(vpW, vpH, scenePassFlipY, srcTex) {
     var pv = (grp && !groupEnabled[grp]) ? PARAM_DEF[pid] : state.params[pid];
     gl.uniform1f(uni[pid], pv);
   }
-  var stock = GRAIN_STOCK[state.grainStock] || GRAIN_STOCK['35mm'];
-  gl.uniform1f(uni.grainStockSize, stock[0]);
-  gl.uniform1f(uni.grainStockInt, stock[1]);
   var lutOn = groupEnabled.LUT;
   for (var s = 0; s < 2; s++) {
     var lut = state.luts[s];
@@ -1965,27 +1964,46 @@ function buildSliders() {
 }
 buildSliders();
 
-// Film-stock "Type" dropdown for grain. The minimal grain control set is just
-// intensity (Grain) + type (this) + size; softness/roughness/luma-response are
-// fixed to the stock defaults inside the shader.
+// Film-stock "Type" dropdown for grain. It is the hero control: picking a stock
+// WRITES the Grain (intensity) + Grain size sliders to that format's values
+// (WYSIWYG - what you see is what applies). Editing either slider by hand flips
+// the dropdown back to Custom. The minimal control set stays intensity + type +
+// size; softness/roughness/luma-response are fixed to the stock defaults.
 var grainStockSelect = null;
+var applyingStock = false;
+function setGrainSlider(id, v) {
+  var s = sliderInputs[id];
+  if (!s) return;
+  s.input.value = v;
+  state.params[id] = v;
+  s.refresh();
+}
+function applyGrainStock(name) {
+  var f = GRAIN_STOCK_FILL[name];
+  if (!f) return;            // 'custom': leave the sliders as they are
+  applyingStock = true;
+  setGrainSlider('grain', f[0]);
+  setGrainSlider('grainSize', f[1]);
+  applyingStock = false;
+}
 (function () {
-  var sizeRow = sliderInputs.grainSize && sliderInputs.grainSize.input.closest('.slider-row');
-  if (!sizeRow) return;
+  var grainRow = sliderInputs.grain && sliderInputs.grain.input.closest('.slider-row');
+  if (!grainRow) return;
   var row = document.createElement('div');
   row.className = 'slider-row';
   var head = document.createElement('div');
   head.className = 'slider-head';
   var lbl = document.createElement('span');
-  lbl.textContent = 'Type';
+  lbl.textContent = 'Film stock';
   head.appendChild(lbl);
   row.appendChild(head);
   var sel = document.createElement('select');
   sel.className = 'grain-type';
   [['super8', 'Super 8 - coarse, heavy'],
-   ['16mm', '16mm - visible'],
-   ['35mm', '35mm - fine'],
-   ['65mm', '65mm - near-clean']].forEach(function (o) {
+   ['16mm', '16mm - gritty doc'],
+   ['35mm', '35mm - fine (reference)'],
+   ['65mm', '65mm - near-clean'],
+   ['custom', 'Custom']].forEach(function (o) {
     var opt = document.createElement('option');
     opt.value = o[0]; opt.textContent = o[1];
     sel.appendChild(opt);
@@ -1993,12 +2011,19 @@ var grainStockSelect = null;
   sel.value = state.grainStock;
   sel.addEventListener('change', function () {
     state.grainStock = sel.value;
+    applyGrainStock(sel.value);
     requestRender();
   });
   row.appendChild(sel);
-  // Order in the Effects panel: Grain (intensity), Type, Grain size.
-  sizeRow.parentNode.insertBefore(row, sizeRow);
+  // Hero order in the Effects panel: Film stock, Grain (intensity), Grain size.
+  grainRow.parentNode.insertBefore(row, grainRow);
   grainStockSelect = sel;
+  // Editing intensity or size by hand means the look no longer matches a preset.
+  ['grain', 'grainSize'].forEach(function (id) {
+    if (sliderInputs[id]) sliderInputs[id].input.addEventListener('input', function () {
+      if (!applyingStock) { sel.value = 'custom'; state.grainStock = 'custom'; }
+    });
+  });
 })();
 
 // LUT panel is static HTML; give its header the same eye toggle.
@@ -2020,8 +2045,8 @@ function resetAllSliders() {
     state.params[id] = s.def;
     s.refresh();
   });
-  state.grainStock = '35mm';
-  if (grainStockSelect) grainStockSelect.value = '35mm';
+  state.grainStock = 'custom';
+  if (grainStockSelect) grainStockSelect.value = 'custom';
   // Reset all also clears rotation, crop, zoom and pan.
   state.angleDeg = 0;
   state.zoom = 1;

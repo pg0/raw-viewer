@@ -49,6 +49,7 @@
     flex-direction: column;
   }
   #canvaswrap { flex: 1; position: relative; overflow: hidden; touch-action: none; }
+  #canvaswrap:fullscreen { background: #141414; }
   /* Floating size toggle (mobile only): switch the photo pane between 2/3 and 1/3 */
   #btnViewSize {
     display: none;
@@ -187,15 +188,50 @@
   }
 
   #footer {
-    padding: 6px 12px;
+    padding: 5px 12px;
     font-size: 11px;
     color: #666;
     border-top: 1px solid #2a2a2a;
     background: #1a1a1a;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  #footerhint {
+    flex: 1 1 auto;
+    min-width: 0;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
   }
+  #statusbar-tools { flex: 0 0 auto; display: flex; align-items: center; gap: 6px; }
+  #statusbar-tools button { padding: 3px 9px; font-size: 11px; }
+  #btnAB { min-width: 30px; font-weight: 600; text-align: center; }
+  #btnAB.active, #btnABSplit.active { background: #2d5f95; border-color: #3a72ad; color: #fff; }
+  #btnABSplit { font-weight: 600; }
+  /* A|B split-screen divider over the image */
+  #absplit { position: absolute; top: 0; bottom: 0; z-index: 7; pointer-events: none; }
+  #absplit[hidden] { display: none; }
+  #absplit .absplit-line {
+    position: absolute; top: 0; bottom: 0; left: -1px; width: 2px;
+    background: rgba(255,255,255,.85); box-shadow: 0 0 3px rgba(0,0,0,.7);
+  }
+  #absplit .absplit-grip {
+    position: absolute; top: 50%; left: 0; transform: translate(-50%, -50%);
+    display: flex; align-items: center; gap: 4px;
+    background: rgba(20,20,20,.82); border: 1px solid #5a5a5a; border-radius: 13px;
+    padding: 4px 9px; font-size: 11px; font-weight: 600; color: #e6e6e6;
+    cursor: ew-resize; pointer-events: auto; user-select: none; white-space: nowrap;
+  }
+  #absplit .absplit-bar { color: #8a8a8a; font-weight: 400; }
+  #absplit .absplit-a, #absplit .absplit-b { color: #9fc7ec; }
+  .sb-presets { display: inline-flex; align-items: center; gap: 4px; border-left: 1px solid #333; padding-left: 8px; margin-left: 2px; }
+  .sb-presets-label { color: #6f6f6f; margin-right: 2px; }
+  .sb-preset, .sb-presetsave { min-width: 22px; padding: 3px 7px; text-align: center; }
+  .sb-preset.filled:not(:disabled), .sb-presetsave.filled { color: #9fc7ec; border-color: #3a5a78; }
+  .presetrow { align-items: center; margin-top: 8px; }
+  .presetrow-label { font-size: 11px; color: #8a8a8a; margin-right: 2px; }
+  .sb-presetsave { font-size: 11px; }
 
   /* Sidebar */
   #sidebar {
@@ -314,6 +350,10 @@
   #histcanvas { width: 100%; height: 80px; display: block; background: #1b1b1b; border-radius: 4px; }
 
   .slider-row { margin-bottom: 6px; }
+  /* A/B compare: mark rows whose value differs between A and B while B is shown */
+  .slider-row.ab-changed { box-shadow: inset 2px 0 0 0 #d99b3f; border-radius: 2px; padding-left: 5px; }
+  .slider-row.ab-changed .val { color: #e6a94e; font-weight: 600; }
+  .lutslot.ab-changed { box-shadow: inset 2px 0 0 0 #d99b3f; border-radius: 2px; padding-left: 5px; }
   .slider-head {
     display: flex;
     justify-content: space-between;
@@ -415,6 +455,34 @@
     font-size: 12px;
     border-radius: 3px;
   }
+  .lutcycle { padding: 6px 9px; font-size: 13px; line-height: 1; }
+  /* Saved-LUT picker (localStorage cache) */
+  .lutpicker {
+    margin-top: 6px;
+    background: #2c2c2c;
+    border: 1px solid #3a3a3a;
+    border-radius: 4px;
+    padding: 4px;
+    max-height: 168px;
+    overflow-y: auto;
+  }
+  .lutpicker[hidden] { display: none; }
+  .lutpicker-empty { font-size: 10.5px; color: #6f6f6f; padding: 4px 6px; }
+  .lutpicker-item { display: flex; align-items: center; gap: 4px; }
+  .lutpicker-item + .lutpicker-item { margin-top: 3px; }
+  .lutpicker-name {
+    flex: 1; min-width: 0; text-align: left;
+    background: none; border: none; padding: 4px 6px;
+    font-size: 11.5px; color: #cfcfcf;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .lutpicker-name:hover:not(:disabled) { background: #383838; border: none; }
+  .lutpicker-del {
+    flex: 0 0 auto;
+    padding: 0 7px; line-height: 18px; font-size: 12px; border-radius: 3px;
+    color: #d79a9a;
+  }
+  .lutpicker-del:hover:not(:disabled) { background: #4a2b2b; border-color: #6a3a3a; color: #f0c0c0; }
 
   #toast {
     position: fixed;
@@ -554,6 +622,10 @@
           <div class="crop-handle" data-h="w"></div>
         </div>
       </div>
+      <div id="absplit" hidden>
+        <div class="absplit-line"></div>
+        <div class="absplit-grip" title="Drag to move the A|B divider"><span class="absplit-a">A</span><span class="absplit-bar">&#8942;</span><span class="absplit-b">B</span></div>
+      </div>
       <div id="overlay">
         <div class="spinner"></div>
         <div id="overlayText">Decoding RAW...</div>
@@ -561,7 +633,17 @@
       <div id="glerror" hidden>WebGL2 is not available in this browser - the viewer cannot render.</div>
     </div>
     <div id="footer">
-      Wheel: zoom &#183; Drag: pan &#183; Double-click: fit &#183; RAW via LibRaw (run serve.cmd or use the live site) covers 1000+ modern bodies - Sony ARW incl. ZV-E1, Canon CR2/CR3, Nikon NEF, DNG, RAF, ORF, RW2 and more; dcraw decodes older bodies offline (file://). Plus JPEG, PNG, WebP, HEIC, TIFF and .cube LUTs.
+      <span id="footerhint">Wheel: zoom &#183; Drag: pan &#183; Double-click: fit &#183; RAW via LibRaw (run serve.cmd or use the live site) covers 1000+ modern bodies - Sony ARW incl. ZV-E1, Canon CR2/CR3, Nikon NEF, DNG, RAF, ORF, RW2 and more; dcraw decodes older bodies offline (file://). Plus JPEG, PNG, WebP, HEIC, TIFF and .cube LUTs.</span>
+      <div id="statusbar-tools">
+        <button id="btnAB" disabled title="Make an adjustment first to enable A/B compare">A</button>
+        <button id="btnABSplit" disabled title="Split-screen A|B compare with a movable divider">A/B</button>
+        <span class="sb-presets" title="Load a saved settings preset">
+          <span class="sb-presets-label">Preset</span>
+          <button class="sb-preset" data-i="0" disabled title="Load preset 1">1</button>
+          <button class="sb-preset" data-i="1" disabled title="Load preset 2">2</button>
+          <button class="sb-preset" data-i="2" disabled title="Load preset 3">3</button>
+        </span>
+      </div>
     </div>
   </main>
   <aside id="sidebar">
@@ -574,6 +656,12 @@
         <span class="rotdeg-suffix">&#176;</span>
       </span>
       <button id="btnCrop" disabled>Crop</button>
+    </div>
+    <div class="btnrow presetrow" title="Store the current adjustments into a preset slot (kept in this browser)">
+      <span class="presetrow-label">Save preset</span>
+      <button class="sb-presetsave" data-i="0" title="Save current settings to preset 1">1</button>
+      <button class="sb-presetsave" data-i="1" title="Save current settings to preset 2">2</button>
+      <button class="sb-presetsave" data-i="2" title="Save current settings to preset 3">3</button>
     </div>
     <div id="cropbar" hidden>
       <div class="btnrow cropbar-top">
@@ -603,8 +691,9 @@
     <details class="panel" open id="lutpanel">
       <summary>LUT</summary>
       <div class="lutslot">
-        <div class="lutslot-title">LUT1</div>
-        <div class="btnrow"><button id="btnLut0">Load .cube</button></div>
+        <div class="lutslot-title">PreLUT</div>
+        <div class="btnrow"><button id="btnLut0">Load .cube</button><button class="lutcycle" id="btnLutPrev0" disabled title="Previous stored LUT">&#8249;</button><button id="btnLutPick0" disabled title="No stored LUTs yet">loaded</button><button class="lutcycle" id="btnLutNext0" disabled title="Next stored LUT">&#8250;</button></div>
+        <div id="lutpicker0" class="lutpicker" hidden></div>
         <div id="lutinfo0" class="lutinfo" hidden>
           <span id="lutname0"></span>
           <button id="btnLutRemove0" title="Remove LUT">x</button>
@@ -615,8 +704,9 @@
         </div>
       </div>
       <div class="lutslot">
-        <div class="lutslot-title">LUT2</div>
-        <div class="btnrow"><button id="btnLut1">Load .cube</button></div>
+        <div class="lutslot-title">StyleLUT</div>
+        <div class="btnrow"><button id="btnLut1">Load .cube</button><button class="lutcycle" id="btnLutPrev1" disabled title="Previous stored LUT">&#8249;</button><button id="btnLutPick1" disabled title="No stored LUTs yet">loaded</button><button class="lutcycle" id="btnLutNext1" disabled title="Next stored LUT">&#8250;</button></div>
+        <div id="lutpicker1" class="lutpicker" hidden></div>
         <div id="lutinfo1" class="lutinfo" hidden>
           <span id="lutname1"></span>
           <button id="btnLutRemove1" title="Remove LUT">x</button>
@@ -626,7 +716,7 @@
           <input type="range" id="lutIntensity1" min="0" max="100" step="1" value="100">
         </div>
       </div>
-      <div class="luthint">Drop a .cube onto the window to load it as LUT2.</div>
+      <div class="luthint">Drop one or more .cube files onto the window - they are stored and the last is applied to StyleLUT.</div>
     </details>
     <details class="panel" open id="overlaypanel">
       <summary>Overlays</summary>
@@ -900,6 +990,9 @@ var state = {
   tex: null,
   texW: 0,
   texH: 0,
+  texByRes: { half: null, full: null }, // decoded base textures cached per resolution
+  texGen: 0,           // bumped per image load so stale cached textures are ignored
+
   angleDeg: 0,         // free rotation in degrees, clockwise on screen
   zoom: 1,             // 1 = fit, >1 zoomed in
   pan: [0, 0],         // clip-space offset, applied after zoom
@@ -1399,11 +1492,27 @@ if (gl) {
   }
 }
 
-function uploadTexture(img) {
-  if (state.tex) gl.deleteTexture(state.tex);
-  state.tex = gl.createTexture();
+// Base textures for the current image, cached per resolution ('half' | 'full')
+// so switching resolution (A/B compare, the Full-res toggle) re-binds an
+// already-decoded texture instead of decoding again. Cleared on a new image.
+function clearTexCache() {
+  ['half', 'full'].forEach(function (k) {
+    if (state.texByRes[k]) { gl.deleteTexture(state.texByRes[k].tex); state.texByRes[k] = null; }
+  });
+  state.tex = null;
+}
+// Bind a cached base texture as the active one. Returns false if not cached
+// for the current image (a stale entry from a previous image does not count).
+function activateCachedRes(resKey) {
+  var c = state.texByRes[resKey];
+  if (!c || c.gen !== state.texGen) return false;
+  state.tex = c.tex; state.texW = c.w; state.texH = c.h;
+  return true;
+}
+function uploadTexture(img, resKey) {
+  var tex = gl.createTexture();
   gl.activeTexture(gl.TEXTURE0);
-  gl.bindTexture(gl.TEXTURE_2D, state.tex);
+  gl.bindTexture(gl.TEXTURE_2D, tex);
   gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
   gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA16F, img.width, img.height, 0,
     gl.RGBA, gl.FLOAT, img.data);
@@ -1411,6 +1520,28 @@ function uploadTexture(img) {
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  if (resKey) {
+    // Drop stale entries from a previous image, then cache this one.
+    ['half', 'full'].forEach(function (k) {
+      if (state.texByRes[k] && state.texByRes[k].gen !== state.texGen) {
+        gl.deleteTexture(state.texByRes[k].tex); state.texByRes[k] = null;
+      }
+    });
+    if (state.texByRes[resKey] && state.texByRes[resKey].tex !== tex) {
+      gl.deleteTexture(state.texByRes[resKey].tex);
+    }
+    state.texByRes[resKey] = { tex: tex, w: img.width, h: img.height, gen: state.texGen };
+  } else {
+    // Uncached single texture (raster / embedded JPEG) - drop any cached RAW tex
+    // plus a previous standalone raster texture (not held by the cache).
+    var old = state.tex;
+    var wasCached = ['half', 'full'].some(function (k) {
+      return state.texByRes[k] && state.texByRes[k].tex === old;
+    });
+    clearTexCache();
+    if (old && !wasCached && old !== tex) gl.deleteTexture(old);
+  }
+  state.tex = tex;
   state.texW = img.width;
   state.texH = img.height;
 }
@@ -1456,15 +1587,16 @@ function drawQuad(vpW, vpH, angleDeg, flipY, letterbox, zoom, pan, crop, effects
     // buffer, so the post pass can grade base+overlays together.
     // A bypassed group (eye toggled off) renders its params at their defaults.
     var grp = PARAM_GROUP[pid];
-    var pv = (!effects || (grp && !groupEnabled[grp])) ? PARAM_DEF[pid] : state.params[pid];
+    var pv = (!effects || (grp && !abGroupOn(grp))) ? PARAM_DEF[pid] : abParams()[pid];
     gl.uniform1f(uni[pid], pv);
   }
-  var lutOn = effects && groupEnabled.LUT;
+  bindActiveLuts();   // bind the effective (A or B) LUT textures to their units
+  var lutOn = effects && abGroupOn('LUT');
   for (var s = 0; s < 2; s++) {
-    var lut = state.luts[s];
+    var lut = abLuts(s);
     gl.uniform1i(uni.lut[s].mode, (lutOn && lut) ? (lut.is3D ? 1 : 2) : 0);
     gl.uniform1f(uni.lut[s].size, lut ? lut.size : 1);
-    gl.uniform1f(uni.lut[s].inten, state.lutIntensity[s]);
+    gl.uniform1f(uni.lut[s].inten, abLutInt(s));
   }
   var angleRad = -angleDeg * Math.PI / 180; // negative = clockwise on screen
   var rotQ = (((Math.round(angleDeg / 90) % 4) + 4) % 4);
@@ -1649,15 +1781,16 @@ function drawEffectsPost(vpW, vpH, scenePassFlipY, srcTex) {
   for (var i = 0; i < PARAM_IDS.length; i++) {
     var pid = PARAM_IDS[i];
     var grp = PARAM_GROUP[pid];
-    var pv = (grp && !groupEnabled[grp]) ? PARAM_DEF[pid] : state.params[pid];
+    var pv = (grp && !abGroupOn(grp)) ? PARAM_DEF[pid] : abParams()[pid];
     gl.uniform1f(uni[pid], pv);
   }
-  var lutOn = groupEnabled.LUT;
+  bindActiveLuts();
+  var lutOn = abGroupOn('LUT');
   for (var s = 0; s < 2; s++) {
-    var lut = state.luts[s];
+    var lut = abLuts(s);
     gl.uniform1i(uni.lut[s].mode, (lutOn && lut) ? (lut.is3D ? 1 : 2) : 0);
     gl.uniform1f(uni.lut[s].size, lut ? lut.size : 1);
-    gl.uniform1f(uni.lut[s].inten, state.lutIntensity[s]);
+    gl.uniform1f(uni.lut[s].inten, abLutInt(s));
   }
   var vpAspect = vpW / vpH;
   gl.uniform1f(uni.rot, 0);
@@ -1682,6 +1815,35 @@ function requestRender() {
   });
 }
 
+// Split-screen compare: draw A (current) on the left of the divider and B (the
+// snapshot) on the right, using the scissor test. Both base textures are cached,
+// so no decode happens here. Grade/LUT per side comes from abForce via showingB().
+function renderSplit(z, p, crop) {
+  var W = canvas.width, H = canvas.height;
+  var splitPx = Math.max(0, Math.min(W, Math.round(abSplitX * W)));
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  gl.viewport(0, 0, W, H);
+  gl.disable(gl.SCISSOR_TEST);
+  gl.clearColor(0.118, 0.118, 0.118, 1);
+  gl.clear(gl.COLOR_BUFFER_BIT);
+  gl.enable(gl.SCISSOR_TEST);
+  // A (current edit) - left
+  abForce = 'A';
+  activateCachedRes(state.fullRes ? 'full' : 'half');
+  gl.scissor(0, 0, splitPx, H);
+  drawQuad(W, H, state.angleDeg, 1, true, z, p, crop);
+  drawOverlays(W, H, state.angleDeg, 1, z, p, crop);
+  // B (snapshot) - right
+  abForce = 'B';
+  activateCachedRes(abSnapshot.fullRes ? 'full' : 'half');
+  gl.scissor(splitPx, 0, Math.max(0, W - splitPx), H);
+  drawQuad(W, H, state.angleDeg, 1, true, z, p, crop);
+  drawOverlays(W, H, state.angleDeg, 1, z, p, crop);
+  abForce = null;
+  gl.disable(gl.SCISSOR_TEST);
+  activateCachedRes(state.fullRes ? 'full' : 'half'); // restore live base texture
+}
+
 function render() {
   if (!gl || !state.tex) return;
   resizeCanvas();
@@ -1691,7 +1853,9 @@ function render() {
   var z = state.cropping ? 1 : state.zoom;
   var p = state.cropping ? [0, 0] : state.pan;
   var useFx = state.applyFx && state.overlays.length && !state.cropping;
-  if (useFx) {
+  if (abSplit && abSnapshot && !state.cropping) {
+    renderSplit(z, p, activeCrop);
+  } else if (useFx) {
     // 1. ungraded base + overlays into the scene buffer, 2. grade the composite.
     ensureSceneFB(canvas.width, canvas.height);
     gl.bindFramebuffer(gl.FRAMEBUFFER, sceneFB);
@@ -1945,6 +2109,7 @@ function buildSliders() {
     stxt.textContent = grp.group;
     h.appendChild(stxt);
     h.appendChild(makeGroupReset(grp.group, function () {
+      if (typeof captureAbBefore === 'function') captureAbBefore();
       grp.items.forEach(function (item) {
         var s = sliderInputs[item.id];
         if (!s) return;
@@ -2003,7 +2168,7 @@ function buildSliders() {
       row.appendChild(head);
       row.appendChild(input);
       panel.appendChild(row);
-      sliderInputs[item.id] = { input: input, def: item.def, refresh: refresh };
+      sliderInputs[item.id] = { input: input, def: item.def, refresh: refresh, val: val, fmt: fmt, row: row };
     });
     container.appendChild(panel);
   });
@@ -2085,6 +2250,7 @@ function applyGrainStock(name) {
 })();
 
 function resetAllSliders() {
+  if (typeof captureAbBefore === 'function' && !abShowing) captureAbBefore();
   Object.keys(sliderInputs).forEach(function (id) {
     var s = sliderInputs[id];
     s.input.value = s.def;
@@ -2190,7 +2356,7 @@ async function decodeRaw(fullRes) {
     }
     out = null; // drop PPM buffer reference
     if (!gl) return false;
-    uploadTexture(img);
+    uploadTexture(img, fullRes ? 'full' : 'half');
     img.data = null; // drop float copy after GPU upload
     img = null;
     ok = true;
@@ -2294,7 +2460,7 @@ async function decodeRawLibraw(fullRes) {
     var img = librawToFloatRGBA(im, maxTex);
     im = null;
     if (!gl) return false;
-    uploadTexture(img);
+    uploadTexture(img, fullRes ? 'full' : 'half');
     img.data = null; img = null;
     ok = true;
     thumbImg.style.display = 'none';
@@ -2425,6 +2591,9 @@ async function loadRasterImage(file) {
   }
 }
 
+// Sticky "Full resolution" preference: once the user turns it on, new images
+// decode at full res too (until they turn it back off). Session-scoped.
+var fullResPref = false;
 async function loadFile(file) {
   if (state.decoding || state.busy) {
     toast('Please wait - a decode is still running.');
@@ -2448,6 +2617,7 @@ async function loadFile(file) {
     return;
   }
   state.rawBytes = bytes;
+  state.texGen++;   // new image: previous cached-resolution textures become stale
   state.baseName = file.name.replace(/\.[^.]+$/, '') || 'export';
   state.angleDeg = 0;
   state.zoom = 1;
@@ -2455,8 +2625,8 @@ async function loadFile(file) {
   state.crop = { x: 0, y: 0, w: 1, h: 1 };
   if (state.cropping) exitCropMode(false);
   var chk = document.getElementById('chkFullRes');
-  chk.checked = false;
-  state.fullRes = false;
+  chk.checked = fullResPref;   // sticky preference across image loads
+  state.fullRes = fullResPref;
 
   // a. Identify: parse metadata into the panel
   showOverlay('Reading metadata...');
@@ -2494,8 +2664,8 @@ async function loadFile(file) {
   //    (e.g. Sony ZV-E1), where dcraw would only churn before failing.
   await nextFrame();
   var noRawData = /Number of raw images:\s*0\b/.test(metaText);
-  var ok = await decodeRawLibraw(false);
-  if (!ok && !noRawData) ok = await decodeRaw(false);
+  var ok = await decodeRawLibraw(fullResPref);
+  if (!ok && !noRawData) ok = await decodeRaw(fullResPref);
 
   // c2. Last resort for RAWs neither decoder can handle: show the embedded
   //     JPEG so the file is at least viewable, croppable and exportable, and
@@ -2571,6 +2741,11 @@ async function loadEmbeddedThumb(thumbBytes) {
  * ============================================================ */
 function exportJPEG() {
   if (!gl || !state.tex) return;
+  // Export always reflects the current edit (A), never the A/B compare view.
+  var abWas = abShowing;
+  abShowing = false;
+  // If mid-compare on a different-resolution B, rebind A's cached base texture.
+  if (abWas) activateCachedRes(state.fullRes ? 'full' : 'half');
   // Output = the rotated bounding box of the (cropped) image at native pixels.
   // For orthogonal angles this equals the swapped crop dims; for a free angle
   // the tilted corners fall outside the image and are filled black below.
@@ -2593,6 +2768,8 @@ function exportJPEG() {
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     gl.deleteFramebuffer(fbo);
     gl.deleteTexture(tex);
+    abShowing = abWas;
+    if (abWas && abSnapshot) activateCachedRes(abSnapshot.fullRes ? 'full' : 'half');
     toast('Could not create export framebuffer.');
     return;
   }
@@ -2633,6 +2810,8 @@ function exportJPEG() {
   gl.bindFramebuffer(gl.FRAMEBUFFER, null);
   gl.deleteFramebuffer(fbo);
   gl.deleteTexture(tex);
+  abShowing = abWas;   // restore the compare view after the export render
+  if (abWas && abSnapshot) activateCachedRes(abSnapshot.fullRes ? 'full' : 'half');
 
   var out = document.createElement('canvas');
   out.width = w;
@@ -2663,7 +2842,135 @@ function exportJPEG() {
 /* ============================================================
  * LUT handling
  * ============================================================ */
+// --- localStorage LUT cache -------------------------------------------------
+// Parsed LUTs are stored as { name, size, is3D, data(base64 of RGBA8 bytes) }.
+// Storing the quantized bytes (not the .cube text) keeps entries compact.
+var LUT_STORE_KEY = 'rawviewer.luts.v1';
+function u8ToB64(u8) {
+  var CHUNK = 0x8000, parts = [];
+  for (var i = 0; i < u8.length; i += CHUNK) {
+    parts.push(String.fromCharCode.apply(null, u8.subarray(i, i + CHUNK)));
+  }
+  return btoa(parts.join(''));
+}
+function b64ToU8(b64) {
+  var s = atob(b64), u8 = new Uint8Array(s.length);
+  for (var i = 0; i < s.length; i++) u8[i] = s.charCodeAt(i);
+  return u8;
+}
+function lutCacheRead() {
+  try {
+    var arr = JSON.parse(localStorage.getItem(LUT_STORE_KEY) || '[]');
+    return Array.isArray(arr) ? arr : [];
+  } catch (e) { return []; }
+}
+function lutCacheWrite(list) {
+  try { localStorage.setItem(LUT_STORE_KEY, JSON.stringify(list)); return true; }
+  catch (e) { toast('Could not save LUT (browser storage full).'); return false; }
+}
+function lutSameEntry(e, name, size, is3D) {
+  return e.name === name && e.size === size && e.is3D === is3D;
+}
+function lutCacheAdd(name, parsed) {
+  var list = lutCacheRead();
+  var entry = { name: name, size: parsed.size, is3D: parsed.is3D, data: u8ToB64(parsed.data) };
+  var idx = -1;
+  for (var i = 0; i < list.length; i++) {
+    if (lutSameEntry(list[i], name, parsed.size, parsed.is3D)) { idx = i; break; }
+  }
+  if (idx >= 0) list[idx] = entry; else list.push(entry);   // replace-in-place keeps order
+  lutCacheWrite(list);
+  renderLutPickers();
+}
+function lutCacheRemove(name, size, is3D) {
+  var list = lutCacheRead().filter(function (e) { return !lutSameEntry(e, name, size, is3D); });
+  lutCacheWrite(list);
+  // If this LUT is currently applied in a slot, unapply it too - removing a LUT
+  // should also clear it from the image, not just from the stored list.
+  [0, 1].forEach(function (slot) {
+    var l = state.luts[slot];
+    if (l && lutSameEntry(l, name, size, is3D)) removeLUT(slot, false);
+  });
+  renderLutPickers();
+}
+function applyCachedLUT(entry, slot) {
+  applyLUT({ size: entry.size, is3D: entry.is3D, data: b64ToU8(entry.data) }, entry.name, slot);
+}
+// Which stored LUT each slot is parked on, for the prev/next arrows.
+var lutCycleIdx = [-1, -1];
+function cycleLut(slot, dir) {
+  var list = lutCacheRead();
+  if (!list.length) { toast('No stored LUTs yet - load a .cube first.'); return; }
+  var n = list.length;
+  // Cycle order includes a "none" step: none -> LUT1 -> ... -> LUTn -> none.
+  // Positions 0..n map to: 0 = none, k = stored LUT (k-1). (-1 idx = none)
+  var pos = lutCycleIdx[slot] + 1;
+  pos = (((pos + dir) % (n + 1)) + (n + 1)) % (n + 1);
+  var newI = pos - 1;
+  if (newI < 0) { lutCycleIdx[slot] = -1; removeLUT(slot, false); }
+  else { applyCachedLUT(list[newI], slot); }   // applyLUT re-syncs lutCycleIdx[slot]
+}
+function lutLabel(is3D, size) { return is3D ? '3D ' + size + '³' : '1D ' + size; }
+// Rebuild both slots' saved-LUT lists from storage.
+function renderLutPickers() {
+  var list = lutCacheRead();
+  [0, 1].forEach(function (slot) {
+    // The "loaded" picker and the prev/next arrows only work with something
+    // stored - enable them only when the cache has at least one LUT.
+    var pick = document.getElementById('btnLutPick' + slot);
+    var prev = document.getElementById('btnLutPrev' + slot);
+    var next = document.getElementById('btnLutNext' + slot);
+    if (pick) {
+      pick.disabled = !list.length;
+      pick.title = list.length ? 'Pick from stored LUTs' : 'No stored LUTs yet';
+    }
+    if (prev) prev.disabled = !list.length;
+    if (next) next.disabled = !list.length;
+    if (!list.length) { var pb = document.getElementById('lutpicker' + slot); if (pb) pb.hidden = true; }
+    var box = document.getElementById('lutpicker' + slot);
+    if (!box) return;
+    box.innerHTML = '';
+    if (!list.length) {
+      var empty = document.createElement('div');
+      empty.className = 'lutpicker-empty';
+      empty.textContent = 'No saved LUTs yet - load a .cube to store it here.';
+      box.appendChild(empty);
+      return;
+    }
+    list.forEach(function (entry) {
+      var row = document.createElement('div');
+      row.className = 'lutpicker-item';
+      var pick = document.createElement('button');
+      pick.type = 'button';
+      pick.className = 'lutpicker-name';
+      pick.textContent = entry.name;
+      pick.title = 'Load ' + entry.name + ' (' + lutLabel(entry.is3D, entry.size) + ') into this slot';
+      pick.addEventListener('click', function () {
+        applyCachedLUT(entry, slot);
+        box.hidden = true;
+      });
+      var del = document.createElement('button');
+      del.type = 'button';
+      del.className = 'lutpicker-del';
+      del.innerHTML = '&times;';
+      del.title = 'Remove ' + entry.name + ' from storage';
+      del.addEventListener('click', function (e) {
+        e.stopPropagation();
+        lutCacheRemove(entry.name, entry.size, entry.is3D);
+      });
+      row.appendChild(pick);
+      row.appendChild(del);
+      box.appendChild(row);
+    });
+  });
+}
+
 function applyLUT(parsed, name, slot) {
+  // Snapshot the pre-change look so the A/B compare shows the previous LUT.
+  if (typeof captureAbBefore === 'function') {
+    if (abShowing && typeof setAbShowing === 'function') setAbShowing(false);
+    captureAbBefore();
+  }
   // Parsing already succeeded, so the old LUT in this slot can go first.
   // Order matters: removeLUT rebinds the dummy on this unit, which would
   // otherwise overwrite the freshly bound replacement texture.
@@ -2694,12 +3001,23 @@ function applyLUT(parsed, name, slot) {
   gl.activeTexture(gl.TEXTURE0);
   state.luts[slot] = { name: name, size: parsed.size, is3D: parsed.is3D, tex: tex };
   document.getElementById('lutname' + slot).textContent =
-    name + ' (' + (parsed.is3D ? '3D ' + parsed.size + '³' : '1D ' + parsed.size) + ')';
+    name + ' (' + lutLabel(parsed.is3D, parsed.size) + ')';
   document.getElementById('lutinfo' + slot).hidden = false;
+  lutCacheAdd(name, parsed);   // every loaded LUT is saved to the localStorage cache
+  // Park the slot's cycle position on the just-loaded LUT.
+  var cl = lutCacheRead();
+  for (var ci = 0; ci < cl.length; ci++) {
+    if (lutSameEntry(cl[ci], name, parsed.size, parsed.is3D)) { lutCycleIdx[slot] = ci; break; }
+  }
   requestRender();
 }
 
 function removeLUT(slot, silent) {
+  // A user-initiated remove is an edit: snapshot the look with the LUT for A/B.
+  if (!silent && typeof captureAbBefore === 'function') {
+    if (abShowing && typeof setAbShowing === 'function') setAbShowing(false);
+    captureAbBefore();
+  }
   var lut = state.luts[slot];
   if (lut) {
     var units = LUT_UNITS[slot];
@@ -2712,7 +3030,10 @@ function removeLUT(slot, silent) {
       gl.bindTexture(gl.TEXTURE_2D, units.dummy1d);
     }
     gl.activeTexture(gl.TEXTURE0);
-    gl.deleteTexture(lut.tex);
+    // Keep the texture alive if the A/B snapshot still references it.
+    var held = abSnapshot && abSnapshot.luts &&
+               (abSnapshot.luts[0] === lut || abSnapshot.luts[1] === lut);
+    if (!held) gl.deleteTexture(lut.tex);
     state.luts[slot] = null;
   }
   if (!silent) {
@@ -2738,6 +3059,42 @@ function loadLUTFile(file, slot) {
     toast('Could not read LUT file.');
   };
   fr.readAsText(file);
+}
+
+/* Drop several .cube files at once: parse them all, store every one in the LUT
+ * cache (one batched localStorage write to avoid read-modify-write races), then
+ * apply the last dropped LUT to `slot`. */
+function loadLUTFiles(files, slot) {
+  if (!gl) return;
+  var readOne = function (f) {
+    return new Promise(function (resolve) {
+      var fr = new FileReader();
+      fr.onload = function () {
+        try { resolve({ name: f.name, parsed: parseCubeLUT(fr.result) }); }
+        catch (e) { toast('Skipped "' + excerpt(f.name) + '": ' + excerpt(e.message || e)); resolve(null); }
+      };
+      fr.onerror = function () { toast('Could not read "' + excerpt(f.name) + '".'); resolve(null); };
+      fr.readAsText(f);
+    });
+  };
+  Promise.all(Array.prototype.map.call(files, readOne)).then(function (results) {
+    var ok = results.filter(Boolean);
+    if (!ok.length) return;
+    var list = lutCacheRead();
+    ok.forEach(function (r) {
+      var entry = { name: r.name, size: r.parsed.size, is3D: r.parsed.is3D, data: u8ToB64(r.parsed.data) };
+      var idx = -1;
+      for (var i = 0; i < list.length; i++) {
+        if (lutSameEntry(list[i], r.name, r.parsed.size, r.parsed.is3D)) { idx = i; break; }
+      }
+      if (idx >= 0) list[idx] = entry; else list.push(entry);
+    });
+    lutCacheWrite(list);
+    renderLutPickers();
+    var lastR = ok[ok.length - 1];
+    applyLUT(lastR.parsed, lastR.name, slot);   // show the last one in the Style slot
+    toast(ok.length + ' LUT' + (ok.length > 1 ? 's' : '') + ' stored');
+  });
 }
 
 /* ============================================================
@@ -2797,14 +3154,25 @@ rotDeg.addEventListener('keydown', function (e) {
 document.getElementById('btnReset').addEventListener('click', resetAllSliders);
 document.getElementById('btnExport').addEventListener('click', exportJPEG);
 
+// Switch the displayed base texture to a resolution, reusing a cached decode
+// when available (instant) and decoding only the first time each is requested.
+// Does not touch state.fullRes - the caller owns that (A/B leaves it on A).
+async function switchResolution(wantFull) {
+  if (activateCachedRes(wantFull ? 'full' : 'half')) { requestRender(); return true; }
+  if (!state.rawBytes) return false;   // no RAW behind the image (raster fallback)
+  var ok = await decodeRawLibraw(wantFull);
+  if (!ok) ok = await decodeRaw(wantFull);
+  return ok;
+}
+
 document.getElementById('chkFullRes').addEventListener('change', async function () {
   var chk = this;
   var want = chk.checked;
   if (want === state.fullRes) return;
-  var ok = await decodeRawLibraw(want);
-  if (!ok) ok = await decodeRaw(want);
+  var ok = await switchResolution(want);
   if (ok) {
     state.fullRes = want;
+    fullResPref = want;   // sticky: remember the choice for the next image
   } else {
     chk.checked = state.fullRes; // revert on failure
   }
@@ -2821,6 +3189,17 @@ lutInput.addEventListener('change', function () {
     pendingLutSlot = slot;
     lutInput.click();
   });
+  // Toggle the saved-LUT picker; only one slot's list is open at a time.
+  document.getElementById('btnLutPick' + slot).addEventListener('click', function () {
+    var box = document.getElementById('lutpicker' + slot);
+    var show = box.hidden;
+    document.getElementById('lutpicker0').hidden = true;
+    document.getElementById('lutpicker1').hidden = true;
+    box.hidden = !show;
+  });
+  // Step through stored LUTs into this slot.
+  document.getElementById('btnLutPrev' + slot).addEventListener('click', function () { cycleLut(slot, -1); });
+  document.getElementById('btnLutNext' + slot).addEventListener('click', function () { cycleLut(slot, +1); });
   document.getElementById('btnLutRemove' + slot).addEventListener('click', function () {
     removeLUT(slot, false);
   });
@@ -2838,6 +3217,306 @@ lutInput.addEventListener('change', function () {
     requestRender();
   });
 });
+renderLutPickers();   // populate saved-LUT lists from localStorage on startup
+
+/* ============================================================
+ * A/B compare + settings presets
+ * A = the current live grade, B = the grade from one step before (the state
+ * captured right before the latest adjustment). The status-bar button toggles
+ * which one is drawn. Only the grade is compared (sliders, grain, LUT
+ * intensity, group on/off) - the bound LUT textures themselves are shared.
+ * ============================================================ */
+var abSnapshot = null;   // grade "one step before" (the B view)
+var abShowing = false;   // true while B is on screen (the [A] toggle)
+var abSplit = false;     // true while the [A/B] split-screen compare is active
+var abSplitX = 0.5;      // divider position across the canvas (0..1)
+var abForce = null;      // 'A' | 'B' forces the grade during a split half-draw
+// True when the render should use the B snapshot: forced side wins, else toggle.
+function showingB() { return abForce ? (abForce === 'B') : abShowing; }
+function snapshotGrade() {
+  return {
+    params: Object.assign({}, state.params),
+    lutIntensity: state.lutIntensity.slice(),
+    groupEnabled: Object.assign({}, groupEnabled),
+    fullRes: state.fullRes,           // resolution is part of the compared version
+    grainStock: state.grainStock,     // for the film-stock dropdown display
+    luts: [state.luts[0], state.luts[1]] // LUT identity too (textures kept alive below)
+  };
+}
+// Render selectors: return the B snapshot's values while B is shown, else live.
+function abParams()     { return (showingB() && abSnapshot) ? abSnapshot.params : state.params; }
+function abLutInt(s)    { return (showingB() && abSnapshot) ? abSnapshot.lutIntensity[s] : state.lutIntensity[s]; }
+function abGroupOn(grp) { return (showingB() && abSnapshot) ? !!abSnapshot.groupEnabled[grp] : groupEnabled[grp]; }
+function abLuts(s)      { return (showingB() && abSnapshot && abSnapshot.luts) ? abSnapshot.luts[s] : state.luts[s]; }
+// Bind the effective (A or B) LUT texture for each slot to its sampler units,
+// so the compare view can show a different LUT than the live one.
+function bindActiveLuts() {
+  if (!LUT_UNITS) return;
+  for (var s = 0; s < 2; s++) {
+    var units = LUT_UNITS[s], lut = abLuts(s);
+    gl.activeTexture(gl.TEXTURE0 + units.u3d);
+    gl.bindTexture(gl.TEXTURE_3D, (lut && lut.is3D) ? lut.tex : units.dummy3d);
+    gl.activeTexture(gl.TEXTURE0 + units.u1d);
+    gl.bindTexture(gl.TEXTURE_2D, (lut && !lut.is3D) ? lut.tex : units.dummy1d);
+  }
+  gl.activeTexture(gl.TEXTURE0);
+}
+// Free LUT textures held only by a discarded snapshot (not live, not in the new one).
+function freeOrphanSnapshotLuts(oldSnap, keepSnap) {
+  if (!oldSnap || !oldSnap.luts) return;
+  oldSnap.luts.forEach(function (lut) {
+    if (!lut) return;
+    var live = state.luts[0] === lut || state.luts[1] === lut;
+    var kept = keepSnap && keepSnap.luts && (keepSnap.luts[0] === lut || keepSnap.luts[1] === lut);
+    if (!live && !kept) gl.deleteTexture(lut.tex);
+  });
+}
+function updateAbButton() {
+  var b = document.getElementById('btnAB');
+  if (b) {
+    b.disabled = !abSnapshot;
+    b.classList.toggle('active', abShowing && !!abSnapshot);
+    b.textContent = (abShowing && abSnapshot) ? 'B' : 'A';
+    b.title = abSnapshot
+      ? (abShowing ? 'Showing B (previous). Click for A (current).'
+                   : 'Showing A (current). Click for B (previous).')
+      : 'Make an adjustment first to enable A/B compare';
+  }
+  var s = document.getElementById('btnABSplit');
+  if (s) {
+    s.disabled = !abSnapshot;
+    s.classList.toggle('active', abSplit && !!abSnapshot);
+    s.title = abSnapshot
+      ? 'Split-screen A|B compare with a movable divider (A left, B right)'
+      : 'Make an adjustment first to enable A/B compare';
+  }
+}
+function setAbShowing(on) {
+  if (on && !abSnapshot) return;
+  if (on && abSplit) setAbSplit(false);   // the two compare modes are exclusive
+  abShowing = !!on;
+  updateAbButton();
+  syncControlsToAB();   // reflect the shown version's settings in the sidebar
+  // A and B can differ in resolution; bind the matching base texture. Both
+  // versions stay cached, so toggling never re-decodes after the first time.
+  var wantFull = (abShowing && abSnapshot) ? !!abSnapshot.fullRes : !!state.fullRes;
+  var p = switchResolution(wantFull);   // async; instant when cached
+  if (p && p.then) p.then(function () { requestRender(); });
+  requestRender();
+}
+// Reflect the currently shown A/B version's settings in the sidebar controls
+// (display only - never mutates state), and mark the rows that differ between
+// A and B. Sliders, LUT intensities, film stock and the LUT names are covered.
+function syncControlsToAB() {
+  var showB = !!(abShowing && abSnapshot);
+  var P  = showB ? abSnapshot.params : state.params;
+  var LI = showB ? abSnapshot.lutIntensity : state.lutIntensity;
+  var GS = showB ? abSnapshot.grainStock : state.grainStock;
+  Object.keys(sliderInputs).forEach(function (id) {
+    var si = sliderInputs[id];
+    if (!(id in P)) return;
+    si.input.value = P[id];
+    if (si.val && si.fmt) si.val.textContent = si.fmt(P[id]);
+    if (si.row) {
+      var diff = showB && abSnapshot.params[id] !== state.params[id];
+      si.row.classList.toggle('ab-changed', diff);
+    }
+  });
+  [0, 1].forEach(function (slot) {
+    var v = Math.round(LI[slot] * 100);
+    var inp = document.getElementById('lutIntensity' + slot);
+    var val = document.getElementById('lutIntVal' + slot);
+    if (inp) inp.value = v;
+    if (val) val.textContent = v + ' %';
+    var lrow = inp && inp.closest('.slider-row');
+    if (lrow) {
+      var liDiff = showB && abSnapshot.lutIntensity[slot] !== state.lutIntensity[slot];
+      lrow.classList.toggle('ab-changed', liDiff);
+    }
+    // Highlight the LUT slot when the loaded LUT itself differs between A and B.
+    var lutRow = document.getElementById('lutinfo' + slot);
+    var slotEl = lutRow && lutRow.closest('.lutslot');
+    if (slotEl) {
+      var a = state.luts[slot], b = abSnapshot && abSnapshot.luts && abSnapshot.luts[slot];
+      slotEl.classList.toggle('ab-changed', showB && a !== b);
+    }
+  });
+  if (grainStockSelect) {
+    grainStockSelect.value = GS;
+    var gRow = grainStockSelect.closest('.slider-row');
+    if (gRow) gRow.classList.toggle('ab-changed', showB && abSnapshot.grainStock !== state.grainStock);
+  }
+}
+// Enter/leave the split-screen compare. B is frozen while the split is active.
+function setAbSplit(on) {
+  if (on && !abSnapshot) return;
+  if (on && abShowing) setAbShowing(false);
+  abSplit = !!on;
+  document.getElementById('absplit').hidden = !abSplit;
+  positionSplit();
+  updateAbButton();
+  // Pre-warm B's resolution texture so the split has both versions cached.
+  if (abSplit && abSnapshot && !!abSnapshot.fullRes !== !!state.fullRes) {
+    (async function () {
+      var a = !!state.fullRes;
+      await switchResolution(!!abSnapshot.fullRes);
+      await switchResolution(a);
+      requestRender();
+    })();
+  }
+  requestRender();
+}
+function positionSplit() {
+  var el = document.getElementById('absplit');
+  if (el) el.style.left = (abSplitX * 100) + '%';
+}
+// Capture the pre-change grade so it becomes the B view. Skipped while a compare
+// view is on screen so the snapshot (B) is not overwritten with itself.
+function captureAbBefore() {
+  if (abShowing || abSplit) return;
+  var old = abSnapshot;
+  abSnapshot = snapshotGrade();
+  freeOrphanSnapshotLuts(old, abSnapshot);   // release LUT textures no longer referenced
+  updateAbButton();
+}
+document.getElementById('btnAB').addEventListener('click', function () {
+  setAbShowing(!abShowing);
+});
+document.getElementById('btnABSplit').addEventListener('click', function () {
+  setAbSplit(!abSplit);
+});
+// Drag the A|B divider across the image.
+(function () {
+  var grip = document.querySelector('#absplit .absplit-grip');
+  var wrap = document.getElementById('canvaswrap');
+  if (!grip || !wrap) return;
+  var dragging = false;
+  function moveTo(clientX) {
+    var r = wrap.getBoundingClientRect();
+    abSplitX = Math.max(0, Math.min(1, (clientX - r.left) / r.width));
+    positionSplit();
+    requestRender();
+  }
+  grip.addEventListener('pointerdown', function (e) {
+    e.preventDefault(); e.stopPropagation();   // don't start a canvas pan
+    dragging = true;
+    grip.setPointerCapture(e.pointerId);
+  });
+  grip.addEventListener('pointermove', function (e) {
+    if (dragging) { e.preventDefault(); moveTo(e.clientX); }
+  });
+  grip.addEventListener('pointerup', function (e) {
+    dragging = false;
+    try { grip.releasePointerCapture(e.pointerId); } catch (err) {}
+  });
+})();
+window.addEventListener('resize', positionSplit);
+// Any adjustment made from the sidebar snapshots the look right before it.
+document.getElementById('sidebar').addEventListener('pointerdown', function (e) {
+  var t = e.target;
+  if (t && (t.matches('input[type=range]') || t.matches('select'))) {
+    if (abShowing) setAbShowing(false);   // editing exits the B view (toggle mode)
+    captureAbBefore();                    // no-op while the split is active (B frozen)
+  }
+}, true);
+
+/* ---- Settings presets: 3 localStorage slots. Save lives in the sidebar,
+ * load lives next to the A/B button in the status bar. ---- */
+var PRESET_KEY = 'rawviewer.presets.v1';
+function presetsRead() {
+  try {
+    var a = JSON.parse(localStorage.getItem(PRESET_KEY) || '[null,null,null]');
+    return (Array.isArray(a) && a.length === 3) ? a : [null, null, null];
+  } catch (e) { return [null, null, null]; }
+}
+function presetsWrite(a) {
+  try { localStorage.setItem(PRESET_KEY, JSON.stringify(a)); return true; }
+  catch (e) { toast('Could not save preset (browser storage full).'); return false; }
+}
+function updatePresetButtons() {
+  var a = presetsRead();
+  document.querySelectorAll('.sb-preset').forEach(function (btn) {
+    var i = +btn.dataset.i, filled = !!a[i];
+    btn.disabled = !filled;
+    btn.classList.toggle('filled', filled);
+    btn.title = filled ? 'Load preset ' + (i + 1) : 'Preset ' + (i + 1) + ' is empty';
+  });
+  document.querySelectorAll('.sb-presetsave').forEach(function (btn) {
+    var i = +btn.dataset.i;
+    btn.classList.toggle('filled', !!a[i]);
+  });
+}
+function presetSave(i) {
+  var a = presetsRead();
+  a[i] = {
+    params: Object.assign({}, state.params),
+    lutIntensity: state.lutIntensity.slice(),
+    grainStock: state.grainStock,
+    fullRes: state.fullRes
+  };
+  if (presetsWrite(a)) { updatePresetButtons(); toast('Saved preset ' + (i + 1)); }
+}
+function presetLoad(i) {
+  var p = presetsRead()[i];
+  if (!p) { toast('Preset ' + (i + 1) + ' is empty'); return; }
+  if (abShowing) setAbShowing(false);
+  captureAbBefore();   // loading a preset is an edit; keep the pre-load look as B
+  Object.keys(p.params).forEach(function (k) {
+    if (k in state.params) state.params[k] = p.params[k];
+  });
+  state.lutIntensity = p.lutIntensity.slice();
+  state.grainStock = p.grainStock;
+  // Reflect the loaded values back into every control.
+  Object.keys(sliderInputs).forEach(function (id) {
+    var s = sliderInputs[id];
+    if (id in state.params) { s.input.value = state.params[id]; s.refresh(); }
+  });
+  [0, 1].forEach(function (slot) {
+    var v = Math.round(state.lutIntensity[slot] * 100);
+    var inp = document.getElementById('lutIntensity' + slot);
+    var val = document.getElementById('lutIntVal' + slot);
+    if (inp) inp.value = v;
+    if (val) val.textContent = v + ' %';
+  });
+  if (grainStockSelect) grainStockSelect.value = state.grainStock;
+  requestRender();
+  toast('Loaded preset ' + (i + 1));
+  // Full-resolution is part of the saved look: re-decode if it differs and a
+  // RAW is behind the image (the toggle is disabled for raster/JPEG fallbacks).
+  if (typeof p.fullRes === 'boolean' && p.fullRes !== state.fullRes) {
+    var chk = document.getElementById('chkFullRes');
+    if (chk && !chk.disabled) {
+      fullResPref = p.fullRes;
+      chk.checked = p.fullRes;
+      (async function () {
+        var ok = await switchResolution(p.fullRes);
+        if (ok) state.fullRes = p.fullRes; else chk.checked = state.fullRes;
+      })();
+    }
+  }
+}
+document.querySelectorAll('.sb-presetsave').forEach(function (btn) {
+  btn.addEventListener('click', function () { presetSave(+btn.dataset.i); });
+});
+document.querySelectorAll('.sb-preset').forEach(function (btn) {
+  btn.addEventListener('click', function () { presetLoad(+btn.dataset.i); });
+});
+updatePresetButtons();
+updateAbButton();
+
+/* Hotkey: "f" toggles fullscreen of the image pane only (no sidebar). */
+document.addEventListener('keydown', function (e) {
+  if (e.key !== 'f' && e.key !== 'F') return;
+  if (e.ctrlKey || e.metaKey || e.altKey) return;
+  var t = e.target;
+  if (t && ((t.matches && t.matches('input, textarea, select')) || t.isContentEditable)) return;
+  e.preventDefault();
+  var wrap = document.getElementById('canvaswrap');
+  if (document.fullscreenElement) document.exitFullscreen();
+  else if (wrap && wrap.requestFullscreen) wrap.requestFullscreen().catch(function () {});
+});
+// Canvas is sized from its client rect, so re-render when fullscreen flips.
+document.addEventListener('fullscreenchange', function () { requestRender(); });
 
 /* ============================================================
  * Overlays: blend extra images (grain, film strip, light leaks)
@@ -3348,9 +4027,12 @@ window.addEventListener('dragleave', function (e) {
 window.addEventListener('drop', function (e) {
   e.preventDefault();
   document.body.classList.remove('dragover');
-  if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0]) {
-    dispatchFile(e.dataTransfer.files[0]);
-  }
+  var files = e.dataTransfer && e.dataTransfer.files;
+  if (!files || !files.length) return;
+  // Several .cube files at once -> store them all (last one applied to Style).
+  var cubes = Array.prototype.filter.call(files, function (f) { return /\.cube$/i.test(f.name); });
+  if (cubes.length > 1) { loadLUTFiles(cubes, 1); return; }
+  dispatchFile(files[0]);
 });
 
 /* Dropping an image onto the Overlays panel adds it as an overlay instead of

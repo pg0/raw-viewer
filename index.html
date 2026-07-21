@@ -34,8 +34,28 @@
     background: #1c1c1c;
     border-bottom: 1px solid #2e2e2e;
   }
-  #apptitle { font-size: 13px; font-weight: 600; color: #cfcfcf; margin-right: auto; white-space: nowrap; }
-  #topbar .topbar-actions { display: flex; gap: 8px; }
+  #apptitle { font-size: 13px; font-weight: 600; color: #cfcfcf; white-space: nowrap; }
+  /* Filename + RAW-resolution chips sit right of the title (styled like the zoom chip). */
+  #topbar .chip {
+    background: rgba(20,20,20,.6);
+    color: #cfcfcf;
+    border: 1px solid #3a3a3a;
+    border-radius: 4px;
+    padding: 3px 8px;
+    font-size: 11px;
+    line-height: 1.4;
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+  }
+  #fileChip { max-width: 34ch; overflow: hidden; text-overflow: ellipsis; }
+  #topbar #rawResChip { cursor: pointer; background: #000; }
+  #rawResChip:hover { border-color: #4a90d9; color: #fff; }
+  #rawResChip.full { border-color: #3a72ad; color: #cfe3fa; }
+  /* Support chip: subtle by default, brighter once unlocked (matches the rawResChip.full accent). */
+  #btnSupport { cursor: pointer; background: #000; }
+  #btnSupport:hover { border-color: #4a90d9; color: #fff; }
+  #btnSupport.supporter-active { border-color: #3a72ad; color: #cfe3fa; }
+  #topbar .topbar-actions { display: flex; gap: 8px; margin-left: auto; }
   #topbar button { padding: 7px 14px; }
   #app { display: flex; flex: 1 1 auto; min-height: 0; }
 
@@ -224,11 +244,16 @@
     cursor: ew-resize; pointer-events: auto; user-select: none; white-space: nowrap;
   }
   #absplit .absplit-bar { color: #8a8a8a; font-weight: 400; }
-  #absplit .absplit-a, #absplit .absplit-b { color: #9fc7ec; }
+  #absplit .absplit-a { color: #9fc7ec; }
+  #absplit .absplit-b { color: #e6a94e; }  /* B = the changed version, matches the menu markers */
   .sb-presets { display: inline-flex; align-items: center; gap: 4px; border-left: 1px solid #333; padding-left: 8px; margin-left: 2px; }
   .sb-presets-label { color: #6f6f6f; margin-right: 2px; }
   .sb-preset, .sb-presetsave { min-width: 22px; padding: 3px 7px; text-align: center; }
   .sb-preset.filled:not(:disabled), .sb-presetsave.filled { color: #9fc7ec; border-color: #3a5a78; }
+  /* Slots 4-9: a supporter perk, hidden until a valid supporter key unlocks them.
+   * Non-supporters keep the original 3 slots - nothing is removed. */
+  .supporter-slot { display: none; }
+  body.supporter-active .supporter-slot { display: inline-block; }
   .presetrow { align-items: center; margin-top: 8px; }
   .presetrow-label { font-size: 11px; color: #8a8a8a; margin-right: 2px; }
   .sb-presetsave { font-size: 11px; }
@@ -351,9 +376,12 @@
 
   .slider-row { margin-bottom: 6px; }
   /* A/B compare: mark rows whose value differs between A and B while B is shown */
-  .slider-row.ab-changed { box-shadow: inset 2px 0 0 0 #d99b3f; border-radius: 2px; padding-left: 5px; }
+  /* A/B "changed" marker: tint only the value / chosen-LUT text - no border or
+     padding shift (that made the row jump on toggle). */
   .slider-row.ab-changed .val { color: #e6a94e; font-weight: 600; }
-  .lutslot.ab-changed { box-shadow: inset 2px 0 0 0 #d99b3f; border-radius: 2px; padding-left: 5px; }
+  .slider-row.ab-changed select.grain-type { color: #e6a94e; font-weight: 600; }
+  .lutslot.ab-changed .lutinfo span { color: #e6a94e; font-weight: 600; }
+  .grp-name.ab-changed { color: #e6a94e; }  /* group effect toggled (eye) between A and B */
   .slider-head {
     display: flex;
     justify-content: space-between;
@@ -538,6 +566,30 @@
   .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
   .modal-actions button { padding: 8px 16px; }
 
+  /* Support / supporter-key modal (reuses .modal-card / .modal-row / .modal-actions / .hint) */
+  #supportmodal {
+    position: fixed; inset: 0;
+    display: flex; align-items: center; justify-content: center;
+    background: rgba(0,0,0,.55);
+    z-index: 60;
+    padding: 16px;
+  }
+  #supportmodal[hidden] { display: none; }
+  #supportmodal a { color: #6fb0ea; }
+  #supportmodalInput {
+    width: 100%;
+    background: #1a1a1a;
+    color: #eee;
+    border: 1px solid #444;
+    border-radius: 6px;
+    padding: 9px 10px;
+    font-size: 14px;
+    font-family: inherit;
+  }
+  #supportmodalInput:focus { outline: none; border-color: #4a90d9; }
+  .supp-badge { display: block; width: 190px; height: 190px; margin: 4px auto 10px; }
+  #supportmodalName { color: #9fc7ec; font-weight: 600; }
+
   /* Transform gizmo (resize + rotate frame) for text/emoji overlays */
   #gizmo { position: absolute; inset: 0; z-index: 7; pointer-events: none; overflow: visible; }
   #gizmo[hidden] { display: none; }
@@ -579,7 +631,11 @@
 <body>
 <div id="topbar">
   <span id="apptitle">RAW Viewer</span>
+  <div id="fileChip" class="chip" hidden></div>
+  <button id="rawResChip" class="chip" type="button" hidden
+          title="Toggle Full RAW resolution"></button>
   <div class="topbar-actions">
+    <button id="btnSupport" class="chip" type="button" title="Support RAW Viewer">&#9829; Support</button>
     <button id="btnOpen" class="primary">Open image</button>
     <button id="btnExport" class="primary" disabled>Save JPEG</button>
   </div>
@@ -642,12 +698,20 @@
           <button class="sb-preset" data-i="0" disabled title="Load preset 1">1</button>
           <button class="sb-preset" data-i="1" disabled title="Load preset 2">2</button>
           <button class="sb-preset" data-i="2" disabled title="Load preset 3">3</button>
+          <button class="sb-preset supporter-slot" data-i="3" disabled title="Load preset 4">4</button>
+          <button class="sb-preset supporter-slot" data-i="4" disabled title="Load preset 5">5</button>
+          <button class="sb-preset supporter-slot" data-i="5" disabled title="Load preset 6">6</button>
+          <button class="sb-preset supporter-slot" data-i="6" disabled title="Load preset 7">7</button>
+          <button class="sb-preset supporter-slot" data-i="7" disabled title="Load preset 8">8</button>
+          <button class="sb-preset supporter-slot" data-i="8" disabled title="Load preset 9">9</button>
         </span>
       </div>
     </div>
   </main>
   <aside id="sidebar">
     <div class="btnrow toolrow">
+      <button id="btnUndo" class="iconbtn" disabled title="Undo (Ctrl+Z)" aria-label="Undo"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7v6h6"/><path d="M21 17a9 9 0 0 0-9-9 9 9 0 0 0-6 2.3L3 13"/></svg></button>
+      <button id="btnRedo" class="iconbtn" disabled title="Redo (Ctrl+Shift+Z / Ctrl+Y)" aria-label="Redo"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 7v6h-6"/><path d="M3 17a9 9 0 0 1 9-9 9 9 0 0 1 6 2.3L21 13"/></svg></button>
       <button id="btnReset" disabled>Reset all</button>
       <button id="btnRotateCW" class="iconbtn" disabled title="Rotate 90&#176; clockwise" aria-label="Rotate 90 degrees clockwise"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg></button>
       <button id="btnRotateCCW" class="iconbtn" disabled title="Rotate 90&#176; counter-clockwise" aria-label="Rotate 90 degrees counter-clockwise"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg></button>
@@ -662,6 +726,12 @@
       <button class="sb-presetsave" data-i="0" title="Save current settings to preset 1">1</button>
       <button class="sb-presetsave" data-i="1" title="Save current settings to preset 2">2</button>
       <button class="sb-presetsave" data-i="2" title="Save current settings to preset 3">3</button>
+      <button class="sb-presetsave supporter-slot" data-i="3" title="Save current settings to preset 4">4</button>
+      <button class="sb-presetsave supporter-slot" data-i="4" title="Save current settings to preset 5">5</button>
+      <button class="sb-presetsave supporter-slot" data-i="5" title="Save current settings to preset 6">6</button>
+      <button class="sb-presetsave supporter-slot" data-i="6" title="Save current settings to preset 7">7</button>
+      <button class="sb-presetsave supporter-slot" data-i="7" title="Save current settings to preset 8">8</button>
+      <button class="sb-presetsave supporter-slot" data-i="8" title="Save current settings to preset 9">9</button>
     </div>
     <div id="cropbar" hidden>
       <div class="btnrow cropbar-top">
@@ -681,7 +751,7 @@
     </div>
     <label class="togglerow" id="fullResRow" style="display:none">
       <input type="checkbox" id="chkFullRes" disabled>
-      Full resolution (slower)
+      Full RAW resolution (slower)
     </label>
     <details class="panel" open>
       <summary>Histogram</summary>
@@ -764,6 +834,63 @@
     </div>
   </div>
 </div>
+<div id="supportmodal" hidden>
+  <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="supportmodalTitle">
+    <h3 id="supportmodalTitle">Support RAW Viewer</h3>
+    <div id="supportmodalBody">
+      <p class="hint">RAW Viewer is free. If it saves you time, you can support development.</p>
+      <p class="hint"><a href="https://patrickgawron.com/support" target="_blank" rel="noopener">patrickgawron.com/support</a></p>
+      <div class="modal-row">
+        <input type="text" id="supportmodalInput" placeholder="Supporter key" autocomplete="off" spellcheck="false">
+      </div>
+      <div class="modal-actions">
+        <button id="supportmodalClose">Close</button>
+        <button id="supportmodalUnlock" class="primary">Unlock</button>
+      </div>
+    </div>
+    <div id="supportmodalSuccess" hidden>
+      <svg class="supp-badge" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 400" role="img" aria-label="RAW VIEWER supporter certificate">
+        <defs>
+          <path id="raw-viewer-badge-arc-top" d="M 75.5 133.8 A 141 141 0 0 1 324.5 133.8" fill="none"/>
+          <path id="raw-viewer-badge-arc-bottom" d="M 99.13 278.8 A 128 128 0 0 0 300.87 278.8" fill="none"/>
+        </defs>
+      
+        <!-- rosette edge, double -->
+        <path d="M 200 24 Q 216.47 11.72 230.56 26.67 Q 248.92 17.44 260.2 34.61 Q 279.87 28.71 288 47.58 Q 308.41 45.18 313.13 65.18 Q 333.64 66.36 334.82 86.87 Q 354.82 91.59 352.42 112 Q 371.29 120.13 365.39 139.8 Q 382.56 151.08 373.33 169.44 Q 388.28 183.53 376 200 Q 388.28 216.47 373.33 230.56 Q 382.56 248.92 365.39 260.2 Q 371.29 279.87 352.42 288 Q 354.82 308.41 334.82 313.13 Q 333.64 333.64 313.13 334.82 Q 308.41 354.82 288 352.42 Q 279.87 371.29 260.2 365.39 Q 248.92 382.56 230.56 373.33 Q 216.47 388.28 200 376 Q 183.53 388.28 169.44 373.33 Q 151.08 382.56 139.8 365.39 Q 120.13 371.29 112 352.42 Q 91.59 354.82 86.87 334.82 Q 66.36 333.64 65.18 313.13 Q 45.18 308.41 47.58 288 Q 28.71 279.87 34.61 260.2 Q 17.44 248.92 26.67 230.56 Q 11.72 216.47 24 200 Q 11.72 183.53 26.67 169.44 Q 17.44 151.08 34.61 139.8 Q 28.71 120.13 47.58 112 Q 45.18 91.59 65.18 86.87 Q 66.36 66.36 86.87 65.18 Q 91.59 45.18 112 47.58 Q 120.13 28.71 139.8 34.61 Q 151.08 17.44 169.44 26.67 Q 183.53 11.72 200 24 Z" fill="none" stroke="#9a9a9a" stroke-width="4"/>
+        <path d="M 200 33 Q 215.43 23.67 229 35.54 Q 245.81 29.03 257.12 43.07 Q 274.8 39.58 283.5 55.37 Q 301.52 55.01 307.35 72.07 Q 325.16 74.84 327.93 92.65 Q 344.99 98.48 344.63 116.5 Q 360.42 125.2 356.93 142.88 Q 370.97 154.19 364.46 171 Q 376.33 184.57 367 200 Q 376.33 215.43 364.46 229 Q 370.97 245.81 356.93 257.12 Q 360.42 274.8 344.63 283.5 Q 344.99 301.52 327.93 307.35 Q 325.16 325.16 307.35 327.93 Q 301.52 344.99 283.5 344.63 Q 274.8 360.42 257.12 356.93 Q 245.81 370.97 229 364.46 Q 215.43 376.33 200 367 Q 184.57 376.33 171 364.46 Q 154.19 370.97 142.88 356.93 Q 125.2 360.42 116.5 344.63 Q 98.48 344.99 92.65 327.93 Q 74.84 325.16 72.07 307.35 Q 55.01 301.52 55.37 283.5 Q 39.58 274.8 43.07 257.12 Q 29.03 245.81 35.54 229 Q 23.67 215.43 33 200 Q 23.67 184.57 35.54 171 Q 29.03 154.19 43.07 142.88 Q 39.58 125.2 55.37 116.5 Q 55.01 98.48 72.07 92.65 Q 74.84 74.84 92.65 72.07 Q 98.48 55.01 116.5 55.37 Q 125.2 39.58 142.88 43.07 Q 154.19 29.03 171 35.54 Q 184.57 23.67 200 33 Z" fill="none" stroke="#b5b5b5" stroke-width="2"/>
+      
+        <!-- concentric rings -->
+        <circle cx="200" cy="200" r="158" fill="none" stroke="#9a9a9a" stroke-width="3"/>
+        <circle cx="200" cy="200" r="112" fill="none" stroke="#b5b5b5" stroke-width="2"/>
+        <line x1="200" y1="48" x2="200" y2="42" stroke="#b5b5b5" stroke-width="1.5"/><line x1="213.25" y1="48.58" x2="213.77" y2="42.6" stroke="#b5b5b5" stroke-width="1.5"/><line x1="226.39" y1="50.31" x2="227.44" y2="44.4" stroke="#b5b5b5" stroke-width="1.5"/><line x1="239.34" y1="53.18" x2="240.89" y2="47.38" stroke="#b5b5b5" stroke-width="1.5"/><line x1="251.99" y1="57.17" x2="254.04" y2="51.53" stroke="#b5b5b5" stroke-width="1.5"/><line x1="264.24" y1="62.24" x2="266.77" y2="56.8" stroke="#b5b5b5" stroke-width="1.5"/><line x1="276" y1="68.36" x2="279" y2="63.17" stroke="#b5b5b5" stroke-width="1.5"/><line x1="287.18" y1="75.49" x2="290.63" y2="70.57" stroke="#b5b5b5" stroke-width="1.5"/><line x1="297.7" y1="83.56" x2="301.56" y2="78.96" stroke="#b5b5b5" stroke-width="1.5"/><line x1="307.48" y1="92.52" x2="311.72" y2="88.28" stroke="#b5b5b5" stroke-width="1.5"/><line x1="316.44" y1="102.3" x2="321.04" y2="98.44" stroke="#b5b5b5" stroke-width="1.5"/><line x1="324.51" y1="112.82" x2="329.43" y2="109.37" stroke="#b5b5b5" stroke-width="1.5"/><line x1="331.64" y1="124" x2="336.83" y2="121" stroke="#b5b5b5" stroke-width="1.5"/><line x1="337.76" y1="135.76" x2="343.2" y2="133.23" stroke="#b5b5b5" stroke-width="1.5"/><line x1="342.83" y1="148.01" x2="348.47" y2="145.96" stroke="#b5b5b5" stroke-width="1.5"/><line x1="346.82" y1="160.66" x2="352.62" y2="159.11" stroke="#b5b5b5" stroke-width="1.5"/><line x1="349.69" y1="173.61" x2="355.6" y2="172.56" stroke="#b5b5b5" stroke-width="1.5"/><line x1="351.42" y1="186.75" x2="357.4" y2="186.23" stroke="#b5b5b5" stroke-width="1.5"/><line x1="352" y1="200" x2="358" y2="200" stroke="#b5b5b5" stroke-width="1.5"/><line x1="351.42" y1="213.25" x2="357.4" y2="213.77" stroke="#b5b5b5" stroke-width="1.5"/><line x1="349.69" y1="226.39" x2="355.6" y2="227.44" stroke="#b5b5b5" stroke-width="1.5"/><line x1="346.82" y1="239.34" x2="352.62" y2="240.89" stroke="#b5b5b5" stroke-width="1.5"/><line x1="342.83" y1="251.99" x2="348.47" y2="254.04" stroke="#b5b5b5" stroke-width="1.5"/><line x1="337.76" y1="264.24" x2="343.2" y2="266.77" stroke="#b5b5b5" stroke-width="1.5"/><line x1="331.64" y1="276" x2="336.83" y2="279" stroke="#b5b5b5" stroke-width="1.5"/><line x1="324.51" y1="287.18" x2="329.43" y2="290.63" stroke="#b5b5b5" stroke-width="1.5"/><line x1="316.44" y1="297.7" x2="321.04" y2="301.56" stroke="#b5b5b5" stroke-width="1.5"/><line x1="307.48" y1="307.48" x2="311.72" y2="311.72" stroke="#b5b5b5" stroke-width="1.5"/><line x1="297.7" y1="316.44" x2="301.56" y2="321.04" stroke="#b5b5b5" stroke-width="1.5"/><line x1="287.18" y1="324.51" x2="290.63" y2="329.43" stroke="#b5b5b5" stroke-width="1.5"/><line x1="276" y1="331.64" x2="279" y2="336.83" stroke="#b5b5b5" stroke-width="1.5"/><line x1="264.24" y1="337.76" x2="266.77" y2="343.2" stroke="#b5b5b5" stroke-width="1.5"/><line x1="251.99" y1="342.83" x2="254.04" y2="348.47" stroke="#b5b5b5" stroke-width="1.5"/><line x1="239.34" y1="346.82" x2="240.89" y2="352.62" stroke="#b5b5b5" stroke-width="1.5"/><line x1="226.39" y1="349.69" x2="227.44" y2="355.6" stroke="#b5b5b5" stroke-width="1.5"/><line x1="213.25" y1="351.42" x2="213.77" y2="357.4" stroke="#b5b5b5" stroke-width="1.5"/><line x1="200" y1="352" x2="200" y2="358" stroke="#b5b5b5" stroke-width="1.5"/><line x1="186.75" y1="351.42" x2="186.23" y2="357.4" stroke="#b5b5b5" stroke-width="1.5"/><line x1="173.61" y1="349.69" x2="172.56" y2="355.6" stroke="#b5b5b5" stroke-width="1.5"/><line x1="160.66" y1="346.82" x2="159.11" y2="352.62" stroke="#b5b5b5" stroke-width="1.5"/><line x1="148.01" y1="342.83" x2="145.96" y2="348.47" stroke="#b5b5b5" stroke-width="1.5"/><line x1="135.76" y1="337.76" x2="133.23" y2="343.2" stroke="#b5b5b5" stroke-width="1.5"/><line x1="124" y1="331.64" x2="121" y2="336.83" stroke="#b5b5b5" stroke-width="1.5"/><line x1="112.82" y1="324.51" x2="109.37" y2="329.43" stroke="#b5b5b5" stroke-width="1.5"/><line x1="102.3" y1="316.44" x2="98.44" y2="321.04" stroke="#b5b5b5" stroke-width="1.5"/><line x1="92.52" y1="307.48" x2="88.28" y2="311.72" stroke="#b5b5b5" stroke-width="1.5"/><line x1="83.56" y1="297.7" x2="78.96" y2="301.56" stroke="#b5b5b5" stroke-width="1.5"/><line x1="75.49" y1="287.18" x2="70.57" y2="290.63" stroke="#b5b5b5" stroke-width="1.5"/><line x1="68.36" y1="276" x2="63.17" y2="279" stroke="#b5b5b5" stroke-width="1.5"/><line x1="62.24" y1="264.24" x2="56.8" y2="266.77" stroke="#b5b5b5" stroke-width="1.5"/><line x1="57.17" y1="251.99" x2="51.53" y2="254.04" stroke="#b5b5b5" stroke-width="1.5"/><line x1="53.18" y1="239.34" x2="47.38" y2="240.89" stroke="#b5b5b5" stroke-width="1.5"/><line x1="50.31" y1="226.39" x2="44.4" y2="227.44" stroke="#b5b5b5" stroke-width="1.5"/><line x1="48.58" y1="213.25" x2="42.6" y2="213.77" stroke="#b5b5b5" stroke-width="1.5"/><line x1="48" y1="200" x2="42" y2="200" stroke="#b5b5b5" stroke-width="1.5"/><line x1="48.58" y1="186.75" x2="42.6" y2="186.23" stroke="#b5b5b5" stroke-width="1.5"/><line x1="50.31" y1="173.61" x2="44.4" y2="172.56" stroke="#b5b5b5" stroke-width="1.5"/><line x1="53.18" y1="160.66" x2="47.38" y2="159.11" stroke="#b5b5b5" stroke-width="1.5"/><line x1="57.17" y1="148.01" x2="51.53" y2="145.96" stroke="#b5b5b5" stroke-width="1.5"/><line x1="62.24" y1="135.76" x2="56.8" y2="133.23" stroke="#b5b5b5" stroke-width="1.5"/><line x1="68.36" y1="124" x2="63.17" y2="121" stroke="#b5b5b5" stroke-width="1.5"/><line x1="75.49" y1="112.82" x2="70.57" y2="109.37" stroke="#b5b5b5" stroke-width="1.5"/><line x1="83.56" y1="102.3" x2="78.96" y2="98.44" stroke="#b5b5b5" stroke-width="1.5"/><line x1="92.52" y1="92.52" x2="88.28" y2="88.28" stroke="#b5b5b5" stroke-width="1.5"/><line x1="102.3" y1="83.56" x2="98.44" y2="78.96" stroke="#b5b5b5" stroke-width="1.5"/><line x1="112.82" y1="75.49" x2="109.37" y2="70.57" stroke="#b5b5b5" stroke-width="1.5"/><line x1="124" y1="68.36" x2="121" y2="63.17" stroke="#b5b5b5" stroke-width="1.5"/><line x1="135.76" y1="62.24" x2="133.23" y2="56.8" stroke="#b5b5b5" stroke-width="1.5"/><line x1="148.01" y1="57.17" x2="145.96" y2="51.53" stroke="#b5b5b5" stroke-width="1.5"/><line x1="160.66" y1="53.18" x2="159.11" y2="47.38" stroke="#b5b5b5" stroke-width="1.5"/><line x1="173.61" y1="50.31" x2="172.56" y2="44.4" stroke="#b5b5b5" stroke-width="1.5"/><line x1="186.75" y1="48.58" x2="186.23" y2="42.6" stroke="#b5b5b5" stroke-width="1.5"/>
+      
+        <!-- top arc: app name. Word gaps render as thin spaces: a full space plus
+             letter-spacing tears a hole into the arc and makes it look rotated. -->
+        <text font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="30" font-weight="700" letter-spacing="6" fill="#9a9a9a">
+          <textPath href="#raw-viewer-badge-arc-top" startOffset="50%" text-anchor="middle">RAW VIEWER</textPath>
+        </text>
+      
+        <!-- motif -->
+        <circle cx="200" cy="166" r="54" fill="none" stroke="#9a9a9a" stroke-width="6"/><line x1="200" y1="115" x2="217.32" y2="156" stroke="#4a90d9" stroke-width="7.5" stroke-linecap="round"/><line x1="244.17" y1="140.5" x2="217.32" y2="176" stroke="#4a90d9" stroke-width="7.5" stroke-linecap="round"/><line x1="244.17" y1="191.5" x2="200" y2="186" stroke="#4a90d9" stroke-width="7.5" stroke-linecap="round"/><line x1="200" y1="217" x2="182.68" y2="176" stroke="#4a90d9" stroke-width="7.5" stroke-linecap="round"/><line x1="155.83" y1="191.5" x2="182.68" y2="156" stroke="#4a90d9" stroke-width="7.5" stroke-linecap="round"/><line x1="155.83" y1="140.5" x2="200" y2="146" stroke="#4a90d9" stroke-width="7.5" stroke-linecap="round"/><circle cx="200" cy="166" r="9" fill="#4a90d9"/>
+      
+        <!-- SUPPORTER band -->
+        <line x1="62" y1="251" x2="90" y2="251" stroke="#b5b5b5" stroke-width="2"/>
+        <line x1="310" y1="251" x2="338" y2="251" stroke="#b5b5b5" stroke-width="2"/>
+        <text x="200" y="260" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="24" font-weight="600" letter-spacing="6" text-anchor="middle" fill="#b5b5b5">SUPPORTER</text>
+      
+        <!-- bottom arc: certificate -->
+        <text font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="19" font-weight="600" letter-spacing="5" fill="#9a9a9a">
+          <textPath href="#raw-viewer-badge-arc-bottom" startOffset="50%" text-anchor="middle">&#183; CERTIFICATE &#183;</textPath>
+        </text>
+      </svg>
+      <p class="hint">Thanks, <span id="supportmodalName"></span>! Supporter since <span id="supportmodalDate"></span> - that keeps this free for everyone.</p>
+      <p class="hint">Preset slots 4-9 are now unlocked in the sidebar.</p>
+      <div class="modal-actions">
+        <button id="supportmodalDone" class="primary">Done</button>
+      </div>
+    </div>
+  </div>
+</div>
 <input type="file" id="fileinput" hidden
   accept=".arw,.cr2,.cr3,.nef,.nrw,.dng,.raf,.orf,.rw2,.raw,.pef,.srw,.srf,.sr2,.kdc,.dcr,.mrw,.3fr,.erf,.mef,.mos,.x3f,.gpr,.rwl,.iiq,.cap,.fff,.arq,.jpg,.jpeg,.png,.webp,.bmp,.gif,.heic,.heif,.tif,.tiff">
 <input type="file" id="lutinput" hidden accept=".cube">
@@ -775,6 +902,162 @@
      which reads self.pako at init. UTIF bundles its own LZW/PackBits/JPEG paths. -->
 <script src="pako_inflate.min.js"></script>
 <script src="utif.js"></script>
+<!-- Supporter-key verification (ECDSA P-256 + SHA-256, WebCrypto only, no network calls).
+     Adapted copy of C:\code\vibes\supporter-key\src\supporter.js with the production public
+     key baked in - see that project for the CLI that issues keys and the format spec. -->
+<script>
+(function () {
+  "use strict";
+
+  var SUPPORTER_PUBLIC_KEY_B64 = "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE+ZpcXXJzYzpTZx7LBzOqgtssV4agWJl7XAPEHtW7BBuz2FW3bjsdcfebnW8H0s5Gsa6OxlZ2PtqCFccqU9o0kg==";
+
+  function stdB64ToBytes(b64) {
+    var bin = atob(b64);
+    var bytes = new Uint8Array(bin.length);
+    for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    return bytes;
+  }
+
+  function b64urlToBytes(b64url) {
+    var b64 = b64url.replace(/-/g, "+").replace(/_/g, "/");
+    while (b64.length % 4) b64 += "=";
+    return stdB64ToBytes(b64);
+  }
+
+  function utf8Encode(str) {
+    return new TextEncoder().encode(str);
+  }
+
+  function utf8DecodeStrict(bytes) {
+    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  }
+
+  var cachedKeyPromise = null;
+  function getPublicKey() {
+    if (!cachedKeyPromise) {
+      var spkiBytes = stdB64ToBytes(SUPPORTER_PUBLIC_KEY_B64);
+      cachedKeyPromise = crypto.subtle.importKey(
+        "spki",
+        spkiBytes,
+        { name: "ECDSA", namedCurve: "P-256" },
+        false,
+        ["verify"]
+      );
+    }
+    return cachedKeyPromise;
+  }
+
+  async function verify(keyString) {
+    try {
+      if (typeof keyString !== "string") return { valid: false };
+      var parts = keyString.split(".");
+      if (parts.length !== 3) return { valid: false };
+      var prefix = parts[0], payloadB64url = parts[1], sigB64url = parts[2];
+      if (prefix !== "PG1") return { valid: false };
+      if (!payloadB64url || !sigB64url) return { valid: false };
+
+      var payloadJson = utf8DecodeStrict(b64urlToBytes(payloadB64url));
+      var payload = JSON.parse(payloadJson);
+      if (
+        !payload ||
+        payload.v !== 1 ||
+        typeof payload.n !== "string" ||
+        typeof payload.d !== "string"
+      ) {
+        return { valid: false };
+      }
+
+      var sigBytes = b64urlToBytes(sigB64url);
+      var dataBytes = utf8Encode(payloadB64url); // sign/verify the STRING segment itself
+      var key = await getPublicKey();
+      var ok = await crypto.subtle.verify(
+        { name: "ECDSA", hash: "SHA-256" },
+        key,
+        sigBytes,
+        dataBytes
+      );
+      if (!ok) return { valid: false };
+      return { valid: true, name: payload.n, date: payload.d };
+    } catch (e) {
+      return { valid: false };
+    }
+  }
+
+  function readUrlKey() {
+    try {
+      var url = new URL(window.location.href);
+      var k = url.searchParams.get("key");
+      if (k) return { key: k, fromHash: false };
+      if (window.location.hash) {
+        var hashParams = new URLSearchParams(window.location.hash.replace(/^#/, ""));
+        k = hashParams.get("key");
+        if (k) return { key: k, fromHash: true };
+      }
+    } catch (e) {}
+    return null;
+  }
+
+  function stripUrlKey(fromHash) {
+    try {
+      var url = new URL(window.location.href);
+      if (fromHash) {
+        var hashParams = new URLSearchParams(window.location.hash.replace(/^#/, ""));
+        hashParams.delete("key");
+        var newHash = hashParams.toString();
+        url.hash = newHash ? newHash : "";
+      } else {
+        url.searchParams.delete("key");
+      }
+      window.history.replaceState({}, "", url.toString());
+    } catch (e) {}
+  }
+
+  async function init(opts) {
+    opts = opts || {};
+    var storageKey = opts.storageKey || "supporterKey";
+    var onUnlock = opts.onUnlock || function () {};
+    var onLocked = opts.onLocked || function () {};
+
+    var urlKey = readUrlKey();
+    if (urlKey) {
+      var urlResult = await verify(urlKey.key);
+      if (urlResult.valid) {
+        try {
+          localStorage.setItem(storageKey, urlKey.key);
+        } catch (e) {}
+        stripUrlKey(urlKey.fromHash);
+        onUnlock(urlResult.name, urlResult.date);
+        return;
+      }
+    }
+
+    var stored = null;
+    try {
+      stored = localStorage.getItem(storageKey);
+    } catch (e) {}
+    if (stored) {
+      var storedResult = await verify(stored);
+      if (storedResult.valid) {
+        onUnlock(storedResult.name, storedResult.date);
+        return;
+      }
+      try {
+        localStorage.removeItem(storageKey);
+      } catch (e) {}
+    }
+
+    onLocked();
+  }
+
+  function clear(storageKey) {
+    try {
+      localStorage.removeItem(storageKey || "supporterKey");
+    } catch (e) {}
+  }
+
+  window.Supporter = { verify: verify, init: init, clear: clear };
+})();
+</script>
 <script>
 'use strict';
 
@@ -1011,8 +1294,11 @@ var state = {
   lutIntensity: [1, 1],
   overlays: [],             // [{ name, tex, w, h, mode, opacity, tile }] composited over the photo
   applyFx: false,           // grade (LUT/grain/etc.) the overlays together with the photo
-  grainStock: 'custom'      // selected film-stock preset (writes intensity/size); 'custom' = free
+  grainStock: 'custom',     // selected film-stock preset (writes intensity/size); 'custom' = free
+  toneMode: 1               // highlight tone curve: 0 = hard clip, 1 = soft rolloff (default), 2 = ACES filmic
 };
+// Pipeline tone mode fed to the shader (u_toneMode). Single source of truth.
+function toneModeVal() { return state.toneMode | 0; }
 
 // Film-stock presets: picking one WRITES the Grain (intensity) + Grain size
 // sliders to these values (WYSIWYG - the numbers you see are what applies; no
@@ -1048,6 +1334,15 @@ var SLIDER_GROUPS = [
     { id: 'gamma',    label: 'Gamma',    min: 0.3, max: 2.5, step: 0.01, def: 1 },
     { id: 'vignette', label: 'Vignette', min: -1,  max: 1,   step: 0.01, def: 0 }
   ]},
+  { group: 'Denoise', items: [
+    // Multi-scale a-trous wavelet, run first on the linear RAW source (before
+    // grading, so grain re-adds texture on top). Color kills chroma blotches
+    // (the ugly one), Luminance smooths mono grain. Edge-stop is fixed. 0 = off.
+    { id: 'nrColor',   label: 'Color',     min: 0, max: 100, step: 1, def: 0,
+      fmt: function (v) { return v.toFixed(0); } },
+    { id: 'nrLuma',    label: 'Luminance', min: 0, max: 100, step: 1, def: 0,
+      fmt: function (v) { return v.toFixed(0); } }
+  ]},
   { group: 'Grain', items: [
     // Film stock (a dropdown) is injected above these two as the hero control.
     { id: 'grain',     label: 'Intensity',  min: 0,   max: 1,   step: 0.01, def: 0 },
@@ -1063,6 +1358,7 @@ var gl = canvas.getContext('webgl2', { antialias: false, preserveDrawingBuffer: 
 if (!gl) {
   document.getElementById('glerror').hidden = false;
 }
+var dnFloatOK = false;   // set in initGL once EXT_color_buffer_float is probed
 
 var VERT_SRC = [
   '#version 300 es',
@@ -1098,6 +1394,7 @@ var FRAG_SRC = [
   'uniform float u_temperature, u_tint, u_vibrance, u_saturation, u_gamma, u_vignette;',
   'uniform float u_grain, u_grainSize;',
   'uniform int u_fromSrgb;', // 1 = input is an sRGB scene buffer (post pass); re-linearize before grading
+  'uniform int u_toneMode;', // 0 = hard clip (linear), 1 = highlight rolloff, 2 = ACES filmic
   // Two LUT slots: 0 = converter, 1 = style. Each can be 3D or 1D.
   'uniform mediump sampler3D u_lut0_3d;',
   'uniform sampler2D u_lut0_1d;',
@@ -1194,6 +1491,8 @@ var FRAG_SRC = [
   '}',
   '',
   'void main() {',
+  // Denoise is a multi-pass (a-trous wavelet) pre-process that writes a cleaned
+  // texture; the grade samples that texture directly, so nothing to do here.
   '  vec3 rgb = texture(u_image, v_uv).rgb;',
   // Post pass over the composited scene: the buffer holds sRGB display values,
   // so recover linear light before the grade re-runs (base+overlays graded together).
@@ -1222,6 +1521,18 @@ var FRAG_SRC = [
   '    newLuma *= exp2(u_blacks * 1.5 * blMask);',
   '  }',
   '  rgb *= newLuma / max(luma, 1e-6);',
+  '',
+  '  // 3b. Tone curve in linear light (before the sRGB encode). Stops exposure',
+  '  //     from hard-clipping: mode 1 rolls highlights off to 1.0 with a soft',
+  '  //     shoulder (mids/shadows untouched, C1-continuous at the knee); mode 2',
+  '  //     is the ACES filmic S-curve (Narkowicz fit) for a punchier look.',
+  '  if (u_toneMode == 2) {',
+  '    rgb = clamp((rgb * (2.51 * rgb + 0.03)) / (rgb * (2.43 * rgb + 0.59) + 0.14), 0.0, 1.0);',
+  '  } else if (u_toneMode == 1) {',
+  '    vec3 k = vec3(0.75);',              // linear up to the knee, then roll off
+  '    vec3 over = max(rgb - k, vec3(0.0));',
+  '    rgb = min(rgb, k) + (1.0 - k) * (over / (over + (1.0 - k)));',
+  '  }',
   '',
   '  // 4. Linear to sRGB (exact piecewise curve)',
   '  rgb = linToSrgb(rgb);',
@@ -1285,6 +1596,8 @@ var prog = null;
 var uni = {};
 var PARAM_IDS = ['exposure', 'contrast', 'highlights', 'shadows', 'whites', 'blacks',
                  'temperature', 'tint', 'vibrance', 'saturation', 'gamma', 'vignette', 'grain', 'grainSize'];
+// Denoise params (nr*) drive the a-trous pre-pass, not `prog` uniforms - handled in JS.
+var NR_IDS = ['nrColor', 'nrLuma'];
 
 /* Overlay compositing program. Draws an image-aligned quad (same transform as
  * the base) over the rendered photo, blended per mode via GL blending. The base
@@ -1360,6 +1673,96 @@ var OVERLAY_FRAG = [
 var ovProg = null;
 var ovUni = {};
 
+/* ============================================================
+ * Denoise: multi-scale a-trous edge-avoiding wavelet (Dammertz 2010, the
+ * SVGF / darktable technique). Runs as a pre-process on the linear source:
+ * ~5 ping-pong passes, each a 5x5 B3-spline kernel whose sampling stride
+ * doubles (1,2,4,8,16 px) so a handful of taps reach a ~65px effective radius.
+ * Edge-stopping weights (perceptual luma) are re-applied every pass, so coarse
+ * chroma blobs get crushed without bleeding across real edges - the thing a
+ * single-radius bilateral structurally cannot do. YCoCg: matrix-free, reversible.
+ * ============================================================ */
+var DN_VERT = [
+  '#version 300 es',
+  'layout(location = 0) in vec2 a_pos;',
+  'out vec2 v_uv;',
+  'void main() { v_uv = a_pos * 0.5 + 0.5; gl_Position = vec4(a_pos, 0.0, 1.0); }'
+].join('\n');
+
+var DN_YCC = [
+  'vec3 rgb2ycc(vec3 c) {',
+  '  return vec3(0.25 * c.r + 0.5 * c.g + 0.25 * c.b, 0.5 * (c.r - c.b), -0.25 * c.r + 0.5 * c.g - 0.25 * c.b);',
+  '}',
+  'vec3 ycc2rgb(vec3 c) {',
+  '  float t = c.x - c.z;',
+  '  return vec3(t + c.y, c.x + c.z, t - c.y);',
+  '}',
+  'float perc(float y) { return pow(clamp(y, 0.0, 1.0), 1.0 / 2.4); }'
+].join('\n');
+
+// One a-trous iteration. u_stride = 2^pass. u_phiL / u_phiC = luma / chroma
+// edge-stop tightness. Filters luma and chroma with independent edge weights.
+var DN_ATROUS_FRAG = [
+  '#version 300 es',
+  'precision highp float;',
+  'precision highp int;',
+  'in vec2 v_uv;',
+  'out vec4 frag;',
+  'uniform sampler2D u_src;',
+  'uniform vec2 u_texel;',
+  'uniform float u_stride;',
+  'uniform float u_phiL;',
+  'uniform float u_phiC;',
+  DN_YCC,
+  'void main() {',
+  '  vec3 c = rgb2ycc(texture(u_src, v_uv).rgb);',
+  '  float cP = perc(c.x);',
+  '  float H[5];',
+  '  H[0] = 0.0625; H[1] = 0.25; H[2] = 0.375; H[3] = 0.25; H[4] = 0.0625;', // B3 spline
+  '  float sY = 0.0, wY = 0.0; vec2 sC = vec2(0.0); float wC = 0.0;',
+  '  for (int j = 0; j < 5; j++) {',
+  '    for (int i = 0; i < 5; i++) {',
+  '      vec2 off = vec2(float(i - 2), float(j - 2)) * u_stride * u_texel;',
+  '      vec3 s = rgb2ycc(texture(u_src, v_uv + off).rgb);',
+  '      float h = H[i] * H[j];',
+  '      float dP = perc(s.x) - cP;',
+  '      float e = dP * dP;',
+  '      float wl = h * exp(-e * u_phiL);',
+  '      float wc = h * exp(-e * u_phiC);',
+  '      sY += s.x * wl; wY += wl;',
+  '      sC += s.yz * wc; wC += wc;',
+  '    }',
+  '  }',
+  '  vec3 o = vec3(sY / max(wY, 1e-6), sC / max(wC, 1e-6));',
+  '  frag = vec4(ycc2rgb(o), 1.0);',
+  '}'
+].join('\n');
+
+// Final combine: blend the fully-denoised result against the original by the
+// Color (chroma) and Luminance amounts, in YCoCg so each channel is independent.
+var DN_COMBINE_FRAG = [
+  '#version 300 es',
+  'precision highp float;',
+  'precision highp int;',
+  'in vec2 v_uv;',
+  'out vec4 frag;',
+  'uniform sampler2D u_denoised;',
+  'uniform sampler2D u_orig;',
+  'uniform vec2 u_texel;',
+  'uniform float u_lumaAmt, u_colorAmt;',
+  DN_YCC,
+  'void main() {',
+  '  vec3 O = rgb2ycc(texture(u_orig, v_uv).rgb);',
+  '  vec3 D = rgb2ycc(texture(u_denoised, v_uv).rgb);',
+  '  vec3 R = O;',
+  '  R.x  = mix(O.x,  D.x,  u_lumaAmt);',
+  '  R.yz = mix(O.yz, D.yz, u_colorAmt);',
+  '  frag = vec4(ycc2rgb(R), 1.0);',
+  '}'
+].join('\n');
+
+var dnProg = null, dnUni = {}, dncProg = null, dncUni = {};
+
 function compileShader(type, src) {
   var sh = gl.createShader(type);
   gl.shaderSource(sh, src);
@@ -1390,6 +1793,7 @@ function initGL() {
   uni.cropSize = gl.getUniformLocation(prog, 'u_cropSize');
   uni.image = gl.getUniformLocation(prog, 'u_image');
   uni.fromSrgb = gl.getUniformLocation(prog, 'u_fromSrgb');
+  uni.toneMode = gl.getUniformLocation(prog, 'u_toneMode');
   uni.lut = [
     {
       s3d: gl.getUniformLocation(prog, 'u_lut0_3d'),
@@ -1471,6 +1875,47 @@ function initGL() {
   };
   gl.useProgram(ovProg);
   gl.uniform1i(ovUni.ov, 0); // overlays sample from texture unit 0
+
+  // Denoise a-trous program (shares the quad; samples from unit 0).
+  var dvs = compileShader(gl.VERTEX_SHADER, DN_VERT);
+  dnProg = gl.createProgram();
+  gl.attachShader(dnProg, dvs);
+  gl.attachShader(dnProg, compileShader(gl.FRAGMENT_SHADER, DN_ATROUS_FRAG));
+  gl.linkProgram(dnProg);
+  if (!gl.getProgramParameter(dnProg, gl.LINK_STATUS)) {
+    throw new Error('Denoise program: ' + gl.getProgramInfoLog(dnProg));
+  }
+  dnUni = {
+    src: gl.getUniformLocation(dnProg, 'u_src'),
+    texel: gl.getUniformLocation(dnProg, 'u_texel'),
+    stride: gl.getUniformLocation(dnProg, 'u_stride'),
+    phiL: gl.getUniformLocation(dnProg, 'u_phiL'),
+    phiC: gl.getUniformLocation(dnProg, 'u_phiC')
+  };
+  gl.useProgram(dnProg);
+  gl.uniform1i(dnUni.src, 0);
+
+  // Denoise combine program (denoised on unit 0, original on unit 5).
+  dncProg = gl.createProgram();
+  gl.attachShader(dncProg, compileShader(gl.VERTEX_SHADER, DN_VERT));
+  gl.attachShader(dncProg, compileShader(gl.FRAGMENT_SHADER, DN_COMBINE_FRAG));
+  gl.linkProgram(dncProg);
+  if (!gl.getProgramParameter(dncProg, gl.LINK_STATUS)) {
+    throw new Error('Denoise combine program: ' + gl.getProgramInfoLog(dncProg));
+  }
+  dncUni = {
+    denoised: gl.getUniformLocation(dncProg, 'u_denoised'),
+    orig: gl.getUniformLocation(dncProg, 'u_orig'),
+    texel: gl.getUniformLocation(dncProg, 'u_texel'),
+    lumaAmt: gl.getUniformLocation(dncProg, 'u_lumaAmt'),
+    colorAmt: gl.getUniformLocation(dncProg, 'u_colorAmt')
+  };
+  gl.useProgram(dncProg);
+  gl.uniform1i(dncUni.denoised, 0);
+  gl.uniform1i(dncUni.orig, 5);
+  // Rendering into RGBA16F needs this extension; without it, denoise stays off
+  // (denoiseActive() checks the flag) so highlights are never clamped in RGBA8.
+  dnFloatOK = !!gl.getExtension('EXT_color_buffer_float');
 
   // Fullscreen quad
   var vao = gl.createVertexArray();
@@ -1574,13 +2019,103 @@ function isOrthogonal() {
   return m < 0.01 || m > 89.99;
 }
 
+/* ---- Denoise a-trous pipeline: two RGBA16F ping-pong targets sized to the
+ * source texture. computeDenoise() runs the wavelet chain + combine into
+ * dnActiveTex, cached by a param signature so pan/zoom/grade reuse it and only
+ * a denoise-param (or image) change recomputes. gradeSrcTex() is the texture
+ * the grade samples: the denoised one when active, else the raw source. */
+var dnA = null, dnB = null, dnSig = '', dnActiveTex = null;
+function makeDnTarget(w, h) {
+  var tex = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, tex);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA16F, w, h, 0, gl.RGBA, gl.FLOAT, null);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  var fb = gl.createFramebuffer();
+  gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+  var ok = gl.checkFramebufferStatus(gl.FRAMEBUFFER) === gl.FRAMEBUFFER_COMPLETE;
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  return ok ? { fb: fb, tex: tex, w: w, h: h } : null;
+}
+function ensureDnTargets(w, h) {
+  if (dnA && dnA.w === w && dnA.h === h) return !!dnA;
+  [dnA, dnB].forEach(function (t) { if (t) { gl.deleteTexture(t.tex); gl.deleteFramebuffer(t.fb); } });
+  dnA = makeDnTarget(w, h); dnB = makeDnTarget(w, h);
+  dnSig = '';
+  return !!(dnA && dnB);
+}
+function denoiseActive() {
+  var p = state.params;
+  return !!(state.tex && dnProg && dnFloatOK && groupEnabled.Denoise &&
+    (p.nrLuma + p.nrColor) > 0);
+}
+function computeDenoise() {
+  dnActiveTex = null;
+  if (!gl || !denoiseActive()) return;
+  var w = state.texW, h = state.texH;
+  if (!ensureDnTargets(w, h)) return;   // float FBO unsupported -> skip
+  var p = state.params;
+  var sig = [state.texGen, w, h, p.nrLuma, p.nrColor].join(':');
+  if (sig === dnSig) { dnActiveTex = dnB.tex; return; }   // cached
+  var sigL = 0.115;                                 // fixed perceptual luma edge-stop
+  var phiL = 0.5 / (sigL * sigL);
+  var phiC = 0.5 / (0.5 * 0.5);                      // chroma: loose -> smooths blobs
+  gl.disable(gl.SCISSOR_TEST);
+  gl.disable(gl.BLEND);
+  gl.viewport(0, 0, w, h);
+  // a-trous chain: stride doubles each pass (1,2,4,8,16 px)
+  gl.useProgram(dnProg);
+  gl.uniform2f(dnUni.texel, 1 / w, 1 / h);
+  gl.uniform1f(dnUni.phiL, phiL);
+  gl.uniform1f(dnUni.phiC, phiC);
+  var targets = [dnA, dnB];
+  var srcTex = state.tex;
+  var PASSES = 5;
+  for (var i = 0; i < PASSES; i++) {
+    var wr = targets[i % 2];
+    gl.bindFramebuffer(gl.FRAMEBUFFER, wr.fb);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, srcTex);
+    gl.uniform1f(dnUni.stride, Math.pow(2, i));
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    srcTex = wr.tex;
+  }
+  var denoisedTex = targets[(PASSES - 1) % 2].tex;   // last write (dnA for 5 passes)
+  var combineTarget = targets[PASSES % 2];           // the other one (dnB)
+  // combine: blend vs original by amount + sharpen -> combineTarget
+  gl.useProgram(dncProg);
+  gl.uniform2f(dncUni.texel, 1 / w, 1 / h);
+  gl.uniform1f(dncUni.lumaAmt, p.nrLuma / 100);
+  gl.uniform1f(dncUni.colorAmt, p.nrColor / 100);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, combineTarget.fb);
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D, denoisedTex);
+  gl.activeTexture(gl.TEXTURE0 + 5);
+  gl.bindTexture(gl.TEXTURE_2D, state.tex);
+  gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+  gl.activeTexture(gl.TEXTURE0 + 5);
+  gl.bindTexture(gl.TEXTURE_2D, null);
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  dnActiveTex = combineTarget.tex;
+  dnSig = sig;
+}
+// The texture the grade samples: denoised when denoise is active, else the raw.
+function gradeSrcTex() { return dnActiveTex || state.tex; }
+
 function drawQuad(vpW, vpH, angleDeg, flipY, letterbox, zoom, pan, crop, effects) {
   crop = crop || { x: 0, y: 0, w: 1, h: 1 };
   if (effects === undefined) effects = true;
   gl.useProgram(prog);
   gl.activeTexture(gl.TEXTURE0);
-  gl.bindTexture(gl.TEXTURE_2D, state.tex);
+  gl.bindTexture(gl.TEXTURE_2D, gradeSrcTex());
   gl.uniform1i(uni.fromSrgb, 0); // base pass reads the linear photo; no re-linearize
+  // Tone curve only on the graded pass; the ungraded base blit (effects=false)
+  // stays hard-clip so the post pass applies the curve once on the composite.
+  gl.uniform1i(uni.toneMode, effects ? toneModeVal() : 0);
   for (var i = 0; i < PARAM_IDS.length; i++) {
     var pid = PARAM_IDS[i];
     // effects=false renders the ungraded base (only linear->sRGB) into the scene
@@ -1778,6 +2313,7 @@ function drawEffectsPost(vpW, vpH, scenePassFlipY, srcTex) {
   gl.activeTexture(gl.TEXTURE0);
   gl.bindTexture(gl.TEXTURE_2D, srcTex);
   gl.uniform1i(uni.fromSrgb, 1); // scene holds sRGB; re-linearize before grading
+  gl.uniform1i(uni.toneMode, toneModeVal()); // final composite grade: apply the tone curve
   for (var i = 0; i < PARAM_IDS.length; i++) {
     var pid = PARAM_IDS[i];
     var grp = PARAM_GROUP[pid];
@@ -1847,6 +2383,7 @@ function renderSplit(z, p, crop) {
 function render() {
   if (!gl || !state.tex) return;
   resizeCanvas();
+  computeDenoise();   // refresh the denoised source texture if denoise params changed
   // While the crop tool is active, show the whole image at fit (the crop
   // rectangle is an HTML overlay); otherwise render the committed crop.
   var activeCrop = state.cropping ? FULL_CROP : state.crop;
@@ -1877,6 +2414,9 @@ function render() {
     drawQuad(canvas.width, canvas.height, state.angleDeg, 1, true, z, p, activeCrop);
     drawOverlays(canvas.width, canvas.height, state.angleDeg, 1, z, p, activeCrop);
   }
+  // Keep the yellow "changed" markers live while editing in split-compare mode
+  // (the toggle refreshes them on press; the split has no such moment).
+  if (abSplit && abSnapshot) syncControlsToAB();
   updateZoomChip();
   updateCropBox();
   updateGizmo();
@@ -2015,8 +2555,10 @@ function setControlsEnabled(on) {
   syncFullResRow();
   var b100 = document.getElementById('btn100');
   if (b100) b100.hidden = !on;
+  if (typeof updateHistButtons === 'function') updateHistButtons();
   updateRotField();           // controls enable right after a fresh load (angle reset to 0)
   if (on) updateCropAvail();  // refine the Crop button by orthogonality
+  updateTopbarChips();
 }
 
 /* The "Full resolution" toggle only makes sense behind a RAW; hide the whole
@@ -2027,11 +2569,52 @@ function syncFullResRow() {
   if (row) row.style.display = chk.disabled ? 'none' : '';
 }
 
+/* Topbar chips: filename (any image) + a clickable RAW-resolution pill that
+ * mirrors / toggles the "Full RAW resolution" checkbox. The RAW pill only shows
+ * behind a decodable RAW (chkFullRes stays disabled for raster / JPEG fallbacks). */
+function updateTopbarChips() {
+  var fc = document.getElementById('fileChip');
+  var rc = document.getElementById('rawResChip');
+  var chk = document.getElementById('chkFullRes');
+  var hasImg = !!(state && state.tex);
+  if (fc) {
+    if (hasImg && state.fileName) { fc.textContent = state.fileName; fc.title = state.fileName; fc.hidden = false; }
+    else fc.hidden = true;
+  }
+  if (rc) {
+    var isRaw = hasImg && chk && !chk.disabled;
+    if (isRaw) {
+      rc.textContent = state.fullRes ? 'RAW full' : 'RAW 1/2';
+      rc.classList.toggle('full', !!state.fullRes);
+      rc.title = state.fullRes
+        ? 'Full RAW resolution - click for half (faster)'
+        : 'Half RAW resolution - click for full (slower)';
+      rc.hidden = false;
+    } else {
+      rc.hidden = true;
+    }
+  }
+}
+
+/* Switch RAW decode resolution, shared by the checkbox, the topbar RAW pill and
+ * preset load. Re-decodes only when the target differs; keeps all three in sync. */
+async function applyFullRes(want) {
+  var chk = document.getElementById('chkFullRes');
+  if (chk && chk.disabled) return;                 // no RAW behind the image
+  if (want === state.fullRes) { if (chk) chk.checked = state.fullRes; updateTopbarChips(); return; }
+  var ok = await switchResolution(want);
+  if (ok) { state.fullRes = want; fullResPref = want; if (chk) chk.checked = want; }
+  else if (chk) { chk.checked = state.fullRes; }   // revert on failure
+  updateTopbarChips();
+}
+
 /* Slider construction */
 var sliderInputs = {};
 // Per-group bypass (eye toggle). A disabled group renders its params at default.
-var groupEnabled = { Light: true, Color: true, Effects: true, Grain: true, LUT: true };
+var groupEnabled = { Light: true, Color: true, Effects: true, Denoise: true, Grain: true, LUT: true };
+var eyeSyncs = [];        // per-eye refresh fns, so undo/redo can resync every eye button
 var PARAM_GROUP = {}, PARAM_DEF = {};
+var groupTitleEls = {};   // group name -> its title <span> (for the A/B "changed" marker)
 SLIDER_GROUPS.forEach(function (g) {
   g.items.forEach(function (it) { PARAM_GROUP[it.id] = g.group; PARAM_DEF[it.id] = it.def; });
 });
@@ -2050,9 +2633,17 @@ function makeEye(groupName) {
     b.classList.toggle('off', !on);
     b.title = (on ? 'Hide ' : 'Show ') + groupName + ' effect';
   }
+  eyeSyncs.push(sync);
   b.addEventListener('click', function (e) {
     e.preventDefault();   // do not toggle the <details> open state
     e.stopPropagation();
+    // Toggling a group's effect on/off is an A/B step, exactly like editing a
+    // slider: leave the B view and snapshot the look right before the change,
+    // so the compare (toggle + split) can show it and mark the group changed.
+    if (typeof captureAbBefore === 'function') {
+      if (abShowing) setAbShowing(false);
+      captureAbBefore();
+    }
     groupEnabled[groupName] = !groupEnabled[groupName];
     sync();
     requestRender();
@@ -2106,7 +2697,9 @@ function buildSliders() {
     var h = document.createElement('summary');
     h.appendChild(makeEye(grp.group));
     var stxt = document.createElement('span');
+    stxt.className = 'grp-name';
     stxt.textContent = grp.group;
+    groupTitleEls[grp.group] = stxt;
     h.appendChild(stxt);
     h.appendChild(makeGroupReset(grp.group, function () {
       if (typeof captureAbBefore === 'function') captureAbBefore();
@@ -2164,6 +2757,50 @@ function buildSliders() {
       head.addEventListener('dblclick', doReset);
       addDoubleTapReset(input, doReset);
       addDoubleTapReset(head, doReset);
+      // Supporter perk: double-click the number to type an exact value (sub-step
+      // precision). Non-supporters keep the reset behaviour on the number too.
+      function beginValueEdit() {
+        if (!supporterActive) { doReset(); return; }
+        if (val.querySelector('input')) return;
+        var cur = +state.params[item.id].toFixed(4);
+        var edit = document.createElement('input');
+        edit.type = 'text';
+        edit.setAttribute('inputmode', 'decimal');
+        edit.value = String(cur);
+        edit.style.cssText = 'width:5.5ch;text-align:right;font:inherit;color:#e6a94e;' +
+          'background:#111;border:1px solid #555;border-radius:3px;padding:0 2px;margin:0';
+        val.textContent = '';
+        val.appendChild(edit);
+        edit.focus(); edit.select();
+        var done = false;
+        function commit(apply) {
+          if (done) return; done = true;
+          if (apply) {
+            var v = parseFloat(edit.value.trim().replace(',', '.'));
+            if (!isNaN(v)) {
+              v = Math.min(item.max, Math.max(item.min, v));
+              if (v !== state.params[item.id]) {
+                if (typeof captureAbBefore === 'function') captureAbBefore(); // A/B + undo boundary
+                state.params[item.id] = v;
+                input.value = v;
+                requestRender();
+              }
+            }
+          }
+          refresh();   // rebuilds the formatted text, dropping the edit field
+        }
+        edit.addEventListener('keydown', function (e) {
+          e.stopPropagation();
+          if (e.key === 'Enter') { e.preventDefault(); commit(true); }
+          else if (e.key === 'Escape') { e.preventDefault(); commit(false); }
+        });
+        edit.addEventListener('blur', function () { commit(true); });
+        edit.addEventListener('dblclick', function (e) { e.stopPropagation(); });
+      }
+      val.addEventListener('dblclick', function (e) {
+        e.preventDefault(); e.stopPropagation();   // pre-empt the head reset
+        beginValueEdit();
+      });
       refresh();
       row.appendChild(head);
       row.appendChild(input);
@@ -2237,12 +2874,49 @@ function applyGrainStock(name) {
   });
 })();
 
+// Tone-curve selector injected into the Light panel (belongs with Exposure: it
+// controls how highlights behave when you push exposure). One dropdown, so the
+// modes are mutually exclusive - no "rolloff + filmic at once" ambiguity. As a
+// <select> in the sidebar it also rides the A/B + undo edit boundary for free.
+var toneModeSelect = null;
+(function () {
+  var blacksRow = sliderInputs.blacks && sliderInputs.blacks.input.closest('.slider-row');
+  if (!blacksRow) return;
+  var row = document.createElement('div');
+  row.className = 'slider-row';
+  var head = document.createElement('div');
+  head.className = 'slider-head';
+  var lbl = document.createElement('span');
+  lbl.textContent = 'Tone';
+  head.title = 'How highlights roll off before display. Rolloff = soft shoulder (no hard clip); ' +
+               'Filmic = ACES S-curve (more contrast); Hard clip = raw linear.';
+  head.appendChild(lbl);
+  row.appendChild(head);
+  var sel = document.createElement('select');
+  sel.className = 'grain-type';
+  [[1, 'Rolloff (soft highlights)'], [2, 'Filmic (ACES)'], [0, 'Hard clip (linear)']].forEach(function (o) {
+    var opt = document.createElement('option');
+    opt.value = o[0]; opt.textContent = o[1];
+    sel.appendChild(opt);
+  });
+  sel.value = String(state.toneMode);
+  sel.addEventListener('change', function () {
+    state.toneMode = parseInt(sel.value, 10) | 0;
+    requestRender();
+  });
+  row.appendChild(sel);
+  blacksRow.parentNode.appendChild(row);   // bottom of the Light panel, under Blacks
+  toneModeSelect = sel;
+})();
+
 // LUT panel is static HTML; give its header the same eye toggle.
 (function () {
   var sum = document.querySelector('#lutpanel > summary');
   if (sum) {
     var txt = document.createElement('span');
+    txt.className = 'grp-name';
     txt.textContent = sum.textContent.trim();
+    groupTitleEls['LUT'] = txt;
     sum.textContent = '';
     sum.appendChild(makeEye('LUT'));
     sum.appendChild(txt);
@@ -2566,6 +3240,8 @@ async function loadRasterImage(file) {
     }
     state.rawBytes = null; // raster images cannot be re-decoded at full res
     state.baseName = file.name.replace(/\.[^.]+$/, '') || 'export';
+    state.fileName = file.name;
+    if (typeof histClear === 'function') histClear();   // undo history is per-image
     state.angleDeg = 0;
     state.zoom = 1;
     state.pan = [0, 0];
@@ -2582,6 +3258,7 @@ async function loadRasterImage(file) {
     chk.disabled = true; // no RAW behind a raster image
     syncFullResRow();
     state.fullRes = false;
+    updateTopbarChips();   // chk.disabled just changed -> hide the RAW pill
     requestRender();
   } catch (e2) {
     toast('Could not process image: ' + excerpt(e2.message || e2));
@@ -2618,7 +3295,9 @@ async function loadFile(file) {
   }
   state.rawBytes = bytes;
   state.texGen++;   // new image: previous cached-resolution textures become stale
+  if (typeof histClear === 'function') histClear();   // undo history is per-image
   state.baseName = file.name.replace(/\.[^.]+$/, '') || 'export';
+  state.fileName = file.name;
   state.angleDeg = 0;
   state.zoom = 1;
   state.pan = [0, 0];
@@ -2729,6 +3408,7 @@ async function loadEmbeddedThumb(thumbBytes) {
     chk.checked = false; chk.disabled = true; // no raw behind the fallback JPEG
     syncFullResRow();
     state.fullRes = false;
+    updateTopbarChips();   // chk.disabled just changed -> hide the RAW pill
     requestRender();
     return { w: cw, h: ch };
   } catch (e) {
@@ -2755,6 +3435,8 @@ function exportJPEG() {
   var ca = Math.abs(Math.cos(ar)), sa = Math.abs(Math.sin(ar));
   var w = Math.max(1, Math.round(winW * ca + winH * sa));
   var h = Math.max(1, Math.round(winW * sa + winH * ca));
+
+  computeDenoise();   // bake denoise into the export at its native resolution
 
   var tex = gl.createTexture();
   gl.bindTexture(gl.TEXTURE_2D, tex);
@@ -3129,6 +3811,7 @@ function updateCropAvail() {
 // Set the free display angle (degrees, any value). Zoom/pan and the crop do not
 // survive a rotation intuitively, so reset them to keep the mapping unambiguous.
 function setAngle(deg) {
+  if (typeof histPush === 'function') histPush();   // undo point (captures old angle + crop)
   state.angleDeg = ((deg % 360) + 360) % 360;
   state.zoom = 1;
   state.pan = [0, 0];
@@ -3165,17 +3848,12 @@ async function switchResolution(wantFull) {
   return ok;
 }
 
-document.getElementById('chkFullRes').addEventListener('change', async function () {
-  var chk = this;
-  var want = chk.checked;
-  if (want === state.fullRes) return;
-  var ok = await switchResolution(want);
-  if (ok) {
-    state.fullRes = want;
-    fullResPref = want;   // sticky: remember the choice for the next image
-  } else {
-    chk.checked = state.fullRes; // revert on failure
-  }
+document.getElementById('chkFullRes').addEventListener('change', function () {
+  applyFullRes(this.checked);
+});
+// The topbar RAW pill toggles the same resolution as the checkbox.
+document.getElementById('rawResChip').addEventListener('click', function () {
+  applyFullRes(!state.fullRes);
 });
 
 var lutInput = document.getElementById('lutinput');
@@ -3313,7 +3991,11 @@ function setAbShowing(on) {
 // (display only - never mutates state), and mark the rows that differ between
 // A and B. Sliders, LUT intensities, film stock and the LUT names are covered.
 function syncControlsToAB() {
+  // showB = display B's frozen values (only the [A] toggle does that). The split
+  // shows both on canvas, so the sidebar keeps the live A values there.
   var showB = !!(abShowing && abSnapshot);
+  // comparing = mark which controls differ from B, in EITHER compare mode.
+  var comparing = !!abSnapshot && (abShowing || abSplit);
   var P  = showB ? abSnapshot.params : state.params;
   var LI = showB ? abSnapshot.lutIntensity : state.lutIntensity;
   var GS = showB ? abSnapshot.grainStock : state.grainStock;
@@ -3323,7 +4005,7 @@ function syncControlsToAB() {
     si.input.value = P[id];
     if (si.val && si.fmt) si.val.textContent = si.fmt(P[id]);
     if (si.row) {
-      var diff = showB && abSnapshot.params[id] !== state.params[id];
+      var diff = comparing && abSnapshot.params[id] !== state.params[id];
       si.row.classList.toggle('ab-changed', diff);
     }
   });
@@ -3335,7 +4017,7 @@ function syncControlsToAB() {
     if (val) val.textContent = v + ' %';
     var lrow = inp && inp.closest('.slider-row');
     if (lrow) {
-      var liDiff = showB && abSnapshot.lutIntensity[slot] !== state.lutIntensity[slot];
+      var liDiff = comparing && abSnapshot.lutIntensity[slot] !== state.lutIntensity[slot];
       lrow.classList.toggle('ab-changed', liDiff);
     }
     // Highlight the LUT slot when the loaded LUT itself differs between A and B.
@@ -3343,14 +4025,19 @@ function syncControlsToAB() {
     var slotEl = lutRow && lutRow.closest('.lutslot');
     if (slotEl) {
       var a = state.luts[slot], b = abSnapshot && abSnapshot.luts && abSnapshot.luts[slot];
-      slotEl.classList.toggle('ab-changed', showB && a !== b);
+      slotEl.classList.toggle('ab-changed', comparing && a !== b);
     }
   });
   if (grainStockSelect) {
     grainStockSelect.value = GS;
     var gRow = grainStockSelect.closest('.slider-row');
-    if (gRow) gRow.classList.toggle('ab-changed', showB && abSnapshot.grainStock !== state.grainStock);
+    if (gRow) gRow.classList.toggle('ab-changed', comparing && abSnapshot.grainStock !== state.grainStock);
   }
+  // Mark a group's title yellow when its on/off (eye) state differs between A and B.
+  Object.keys(groupTitleEls).forEach(function (g) {
+    var diff = comparing && !!abSnapshot.groupEnabled[g] !== !!groupEnabled[g];
+    groupTitleEls[g].classList.toggle('ab-changed', diff);
+  });
 }
 // Enter/leave the split-screen compare. B is frozen while the split is active.
 function setAbSplit(on) {
@@ -3360,6 +4047,7 @@ function setAbSplit(on) {
   document.getElementById('absplit').hidden = !abSplit;
   positionSplit();
   updateAbButton();
+  syncControlsToAB();   // mark the changed controls yellow (or clear them on exit)
   // Pre-warm B's resolution texture so the split has both versions cached.
   if (abSplit && abSnapshot && !!abSnapshot.fullRes !== !!state.fullRes) {
     (async function () {
@@ -3378,12 +4066,115 @@ function positionSplit() {
 // Capture the pre-change grade so it becomes the B view. Skipped while a compare
 // view is on screen so the snapshot (B) is not overwritten with itself.
 function captureAbBefore() {
+  histPush();   // every A/B edit boundary is also an undo boundary
   if (abShowing || abSplit) return;
   var old = abSnapshot;
   abSnapshot = snapshotGrade();
   freeOrphanSnapshotLuts(old, abSnapshot);   // release LUT textures no longer referenced
   updateAbButton();
 }
+
+/* ---- Undo / redo -----------------------------------------------------------
+ * History records the numeric edit state (all sliders, group show/hide, grain
+ * stock, tone mode, rotation, crop) before each edit. LUT identity and overlays
+ * (GL assets with their own lifetime) are intentionally out of scope. The push
+ * point is captureAbBefore() - the same boundary A/B already uses - plus direct
+ * pushes for rotation/crop, which do not go through it. */
+var histUndo = [], histRedo = [], HIST_MAX = 100, histSuspend = false;
+function histSnap(override) {
+  var s = {
+    params: Object.assign({}, state.params),
+    lutIntensity: state.lutIntensity.slice(),
+    groupEnabled: Object.assign({}, groupEnabled),
+    grainStock: state.grainStock,
+    toneMode: state.toneMode,
+    angleDeg: state.angleDeg,
+    crop: { x: state.crop.x, y: state.crop.y, w: state.crop.w, h: state.crop.h }
+  };
+  if (override) Object.assign(s, override);
+  return s;
+}
+function histSig(s) {
+  return JSON.stringify([s.params, s.lutIntensity, s.groupEnabled, s.grainStock,
+    s.toneMode, s.angleDeg, s.crop]);
+}
+// Record the current (pre-edit) state as an undo point. Deduped against the top
+// so a click that changes nothing (e.g. pointerdown without a drag) is no junk.
+function histPush(override) {
+  if (histSuspend || !state.tex) return;
+  var s = histSnap(override);
+  var sig = histSig(s);
+  if (histUndo.length && histSig(histUndo[histUndo.length - 1]) === sig) return;
+  histUndo.push(s);
+  if (histUndo.length > HIST_MAX) histUndo.shift();
+  histRedo.length = 0;
+  updateHistButtons();
+}
+function histClear() {
+  histUndo.length = 0; histRedo.length = 0; updateHistButtons();
+}
+// Write a snapshot back into live state and resync every control it touches.
+function histApply(s) {
+  histSuspend = true;
+  state.params = Object.assign({}, s.params);
+  Object.keys(sliderInputs).forEach(function (id) {
+    if (!(id in state.params)) return;
+    var si = sliderInputs[id];
+    si.input.value = state.params[id];
+    si.refresh();
+  });
+  Object.keys(s.groupEnabled).forEach(function (g) { groupEnabled[g] = s.groupEnabled[g]; });
+  eyeSyncs.forEach(function (fn) { fn(); });
+  state.grainStock = s.grainStock;
+  if (grainStockSelect) grainStockSelect.value = s.grainStock;
+  state.toneMode = s.toneMode;
+  if (toneModeSelect) toneModeSelect.value = String(s.toneMode);
+  state.lutIntensity = s.lutIntensity.slice();
+  [0, 1].forEach(function (slot) {
+    var v = Math.round(state.lutIntensity[slot] * 100);
+    var inp = document.getElementById('lutIntensity' + slot);
+    var val = document.getElementById('lutIntVal' + slot);
+    if (inp) inp.value = v;
+    if (val) val.textContent = v + ' %';
+  });
+  state.angleDeg = s.angleDeg;
+  if (typeof updateRotField === 'function') updateRotField();
+  state.crop = { x: s.crop.x, y: s.crop.y, w: s.crop.w, h: s.crop.h };
+  if (typeof updateCropAvail === 'function') updateCropAvail();
+  histSuspend = false;
+  requestRender();
+}
+function histUndoDo() {
+  if (!histUndo.length) return;
+  if (abShowing) setAbShowing(false);   // show the result on A
+  histRedo.push(histSnap());
+  histApply(histUndo.pop());
+  updateHistButtons();
+}
+function histRedoDo() {
+  if (!histRedo.length) return;
+  if (abShowing) setAbShowing(false);
+  histUndo.push(histSnap());
+  histApply(histRedo.pop());
+  updateHistButtons();
+}
+function updateHistButtons() {
+  var u = document.getElementById('btnUndo'), r = document.getElementById('btnRedo');
+  if (u) u.disabled = !state.tex || !histUndo || !histUndo.length;
+  if (r) r.disabled = !state.tex || !histRedo || !histRedo.length;
+}
+document.getElementById('btnUndo').addEventListener('click', histUndoDo);
+document.getElementById('btnRedo').addEventListener('click', histRedoDo);
+// Keyboard: Ctrl/Cmd+Z = undo, Ctrl/Cmd+Shift+Z or Ctrl+Y = redo. Skipped while
+// typing in an input/select/textarea so field editing keeps its native undo.
+document.addEventListener('keydown', function (e) {
+  if (!(e.ctrlKey || e.metaKey)) return;
+  var t = e.target;
+  if (t && (t.tagName === 'INPUT' || t.tagName === 'SELECT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+  var k = e.key.toLowerCase();
+  if (k === 'z' && !e.shiftKey) { e.preventDefault(); histUndoDo(); }
+  else if ((k === 'z' && e.shiftKey) || k === 'y') { e.preventDefault(); histRedoDo(); }
+});
 document.getElementById('btnAB').addEventListener('click', function () {
   setAbShowing(!abShowing);
 });
@@ -3425,14 +4216,20 @@ document.getElementById('sidebar').addEventListener('pointerdown', function (e) 
   }
 }, true);
 
-/* ---- Settings presets: 3 localStorage slots. Save lives in the sidebar,
- * load lives next to the A/B button in the status bar. ---- */
+/* ---- Settings presets: 3 localStorage slots (9 for supporters - see the
+ * "Supporter key" block near the end of this script). Save lives in the
+ * sidebar, load lives next to the A/B button in the status bar. ---- */
 var PRESET_KEY = 'rawviewer.presets.v1';
+var supporterActive = false; // flipped true by Supporter.init()'s onUnlock, see bottom of file
+function presetSlotCount() { return supporterActive ? 9 : 3; }
 function presetsRead() {
-  try {
-    var a = JSON.parse(localStorage.getItem(PRESET_KEY) || '[null,null,null]');
-    return (Array.isArray(a) && a.length === 3) ? a : [null, null, null];
-  } catch (e) { return [null, null, null]; }
+  var a;
+  try { a = JSON.parse(localStorage.getItem(PRESET_KEY) || '[]'); }
+  catch (e) { a = []; }
+  if (!Array.isArray(a)) a = [];
+  var n = presetSlotCount();
+  while (a.length < n) a.push(null); // pad, never drop already-saved slots
+  return a;
 }
 function presetsWrite(a) {
   try { localStorage.setItem(PRESET_KEY, JSON.stringify(a)); return true; }
@@ -3457,7 +4254,8 @@ function presetSave(i) {
     params: Object.assign({}, state.params),
     lutIntensity: state.lutIntensity.slice(),
     grainStock: state.grainStock,
-    fullRes: state.fullRes
+    fullRes: state.fullRes,
+    toneMode: state.toneMode
   };
   if (presetsWrite(a)) { updatePresetButtons(); toast('Saved preset ' + (i + 1)); }
 }
@@ -3471,6 +4269,10 @@ function presetLoad(i) {
   });
   state.lutIntensity = p.lutIntensity.slice();
   state.grainStock = p.grainStock;
+  // Tone curve is part of the saved look (older presets omit it -> default to
+  // soft rolloff so they still render without hard clipping).
+  state.toneMode = (typeof p.toneMode === 'number') ? p.toneMode : 1;
+  if (toneModeSelect) toneModeSelect.value = String(state.toneMode);
   // Reflect the loaded values back into every control.
   Object.keys(sliderInputs).forEach(function (id) {
     var s = sliderInputs[id];
@@ -3496,6 +4298,7 @@ function presetLoad(i) {
       (async function () {
         var ok = await switchResolution(p.fullRes);
         if (ok) state.fullRes = p.fullRes; else chk.checked = state.fullRes;
+        updateTopbarChips();
       })();
     }
   }
@@ -4595,6 +5398,13 @@ function enterCropMode() {
 
 function exitCropMode(apply) {
   if (!state.cropping) return;
+  if (apply && cropBackup) {
+    var c = state.crop;
+    if ((c.x !== cropBackup.x || c.y !== cropBackup.y || c.w !== cropBackup.w || c.h !== cropBackup.h)
+        && typeof histPush === 'function') {
+      histPush({ crop: cropBackup });   // undo point: the crop before this apply
+    }
+  }
   if (!apply && cropBackup) {
     state.crop = cropBackup;
   }
@@ -4677,6 +5487,100 @@ Array.prototype.forEach.call(document.querySelectorAll('#cropbar .ratio'), funct
 });
 document.getElementById('btnOrient').addEventListener('click', toggleOrientation);
 updateRatioLabels();
+
+/* ---- Supporter key: UI wiring (heart chip + unlock modal + preset-slot perk).
+ * Crypto verification (ECDSA P-256 + SHA-256 via WebCrypto) lives in
+ * window.Supporter, defined in the dedicated <script> block right after
+ * utif.js. Nothing here talks to a network - verification is fully local. */
+var SUPPORTER_STORAGE_KEY = 'rawViewerSupporterKey';
+var btnSupport = document.getElementById('btnSupport');
+var supportModal = document.getElementById('supportmodal');
+var supportModalBody = document.getElementById('supportmodalBody');
+var supportModalSuccess = document.getElementById('supportmodalSuccess');
+var supportModalInput = document.getElementById('supportmodalInput');
+var supportModalName = document.getElementById('supportmodalName');
+var supportModalDate = document.getElementById('supportmodalDate');
+var supporterInfo = null; // { name, date } once unlocked
+
+function updateSupportChip() {
+  if (supporterInfo) {
+    btnSupport.textContent = '♥ Thanks, ' + supporterInfo.name;
+    btnSupport.title = 'Supporter since ' + supporterInfo.date;
+    btnSupport.classList.add('supporter-active');
+  } else {
+    btnSupport.textContent = '♥ Support';
+    btnSupport.title = 'Support RAW Viewer';
+    btnSupport.classList.remove('supporter-active');
+  }
+}
+
+function openSupportModal() {
+  supportModal.hidden = false;
+  if (supporterInfo) {
+    supportModalBody.hidden = true;
+    supportModalSuccess.hidden = false;
+    supportModalName.textContent = supporterInfo.name;
+    supportModalDate.textContent = supporterInfo.date;
+  } else {
+    supportModalBody.hidden = false;
+    supportModalSuccess.hidden = true;
+    requestAnimationFrame(function () { supportModalInput.focus(); });
+  }
+}
+function closeSupportModal() { supportModal.hidden = true; }
+
+function applySupporterUnlock(name, date) {
+  supporterInfo = { name: name, date: date };
+  supporterActive = true;
+  document.body.classList.add('supporter-active');
+  updateSupportChip();
+  updatePresetButtons(); // reveals + wires the 6 extra preset slots (data-i already in the DOM)
+}
+
+function applySupporterLock() {
+  supporterInfo = null;
+  supporterActive = false;
+  document.body.classList.remove('supporter-active');
+  updateSupportChip();
+  updatePresetButtons();
+}
+
+async function trySupportUnlock() {
+  var keyString = supportModalInput.value.trim();
+  if (!keyString) return;
+  var result = await Supporter.verify(keyString);
+  if (result.valid) {
+    try { localStorage.setItem(SUPPORTER_STORAGE_KEY, keyString); } catch (e) {}
+    applySupporterUnlock(result.name, result.date);
+    supportModalInput.value = '';
+    supportModalBody.hidden = true;
+    supportModalSuccess.hidden = false;
+    supportModalName.textContent = result.name;
+    supportModalDate.textContent = result.date;
+    toast('Thanks, ' + result.name + '! Preset slots 4-9 are unlocked.');
+  } else {
+    toast('That key did not verify - double-check it and try again.');
+  }
+}
+
+btnSupport.addEventListener('click', openSupportModal);
+document.getElementById('supportmodalClose').addEventListener('click', closeSupportModal);
+document.getElementById('supportmodalDone').addEventListener('click', closeSupportModal);
+document.getElementById('supportmodalUnlock').addEventListener('click', trySupportUnlock);
+supportModal.addEventListener('mousedown', function (e) { if (e.target === supportModal) closeSupportModal(); });
+supportModalInput.addEventListener('keydown', function (e) {
+  if (e.key === 'Enter') { e.preventDefault(); trySupportUnlock(); }
+  else if (e.key === 'Escape') { e.preventDefault(); closeSupportModal(); }
+});
+
+updateSupportChip();
+if (window.Supporter) {
+  Supporter.init({
+    storageKey: SUPPORTER_STORAGE_KEY,
+    onUnlock: function (name, date) { applySupporterUnlock(name, date); },
+    onLocked: function () { applySupporterLock(); }
+  });
+}
 
 window.addEventListener('resize', requestRender);
 </script>

@@ -41,6 +41,30 @@ For a RAW file the app tries, in order:
 2. **dcraw** (also `file://`) - older cameras.
 3. **Embedded JPEG** - last resort so the file stays viewable / croppable / exportable.
 
+## Supporter key
+
+RAW Viewer is free and stays free - no login, no paywall, no tracking. If it
+saves you time, there's an optional "supporter key" honor-system nudge: the
+♥ Support chip in the top bar opens a small modal explaining the deal, with
+a link to <https://patrickgawron.com/support>.
+
+Unlock works three ways:
+- Paste a key into the modal's input and hit Unlock.
+- Open the app with `?key=<key>` or `#key=<key>` in the URL (the key is
+  saved to `localStorage` and stripped from the URL automatically).
+- Nothing to do on repeat visits - a previously unlocked key is remembered.
+
+Once unlocked, the chip becomes "♥ Thanks, `<name>`" (hover for the
+supporter-since date), and the settings-preset row in the sidebar grows from
+**3 slots to 9** - the app's only supporter perk. Nothing is removed or
+gated for non-supporters; the tool stays fully functional either way.
+
+Verification is 100% local: ECDSA P-256 + SHA-256 via the browser's
+`crypto.subtle`, no network call, no server. Keys are issued with the
+[`supporter-key`](../supporter-key) CLI - see that project for the format
+spec, the issuing workflow, and how to embed the same verify snippet in
+another tool.
+
 ## Files
 | File | Purpose |
 |---|---|

@@ -3197,9 +3197,14 @@ lutInput.addEventListener('change', function () {
     document.getElementById('lutpicker1').hidden = true;
     box.hidden = !show;
   });
-  // Step through stored LUTs into this slot.
-  document.getElementById('btnLutPrev' + slot).addEventListener('click', function () { cycleLut(slot, -1); });
-  document.getElementById('btnLutNext' + slot).addEventListener('click', function () { cycleLut(slot, +1); });
+  // Step through stored LUTs into this slot; cycling closes the open picker.
+  function stepLut(dir) {
+    document.getElementById('lutpicker0').hidden = true;
+    document.getElementById('lutpicker1').hidden = true;
+    cycleLut(slot, dir);
+  }
+  document.getElementById('btnLutPrev' + slot).addEventListener('click', function () { stepLut(-1); });
+  document.getElementById('btnLutNext' + slot).addEventListener('click', function () { stepLut(+1); });
   document.getElementById('btnLutRemove' + slot).addEventListener('click', function () {
     removeLUT(slot, false);
   });

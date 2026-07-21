@@ -280,6 +280,15 @@
   .eyebtn:active:not(:disabled) { background: none; }
   .eyebtn.off { color: #565656; }
 
+  /* Per-group "reset to default" button, sits at the far right of a panel summary. */
+  .grpreset {
+    background: none; border: none; padding: 0; margin: 0 0 0 auto;
+    color: #7a7a7a; cursor: pointer; line-height: 0;
+    display: inline-flex; align-items: center;
+  }
+  .grpreset:hover:not(:disabled) { background: none; border: none; color: #e6e6e6; }
+  .grpreset:active:not(:disabled) { background: none; }
+
   .togglerow {
     display: flex; align-items: center; gap: 8px;
     font-size: 12px; color: #bbb;
@@ -1888,6 +1897,25 @@ function makeEye(groupName) {
   return b;
 }
 
+var RESET_ICON = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>';
+
+// Build a "reset group to defaults" button for a panel summary. `onReset` does
+// the actual work; the button stops propagation so it never toggles the panel.
+function makeGroupReset(groupName, onReset) {
+  var b = document.createElement('button');
+  b.type = 'button';
+  b.className = 'grpreset';
+  b.innerHTML = RESET_ICON;
+  b.title = 'Reset ' + groupName + ' to defaults';
+  b.setAttribute('aria-label', 'Reset ' + groupName + ' to defaults');
+  b.addEventListener('click', function (e) {
+    e.preventDefault();
+    e.stopPropagation();
+    onReset();
+  });
+  return b;
+}
+
 /* Touch double-tap detector: fires cb on two quick taps at roughly the same
  * spot. dblclick is unreliable on touch, and range inputs swallow it. */
 function addDoubleTapReset(el, cb) {
@@ -1916,6 +1944,21 @@ function buildSliders() {
     var stxt = document.createElement('span');
     stxt.textContent = grp.group;
     h.appendChild(stxt);
+    h.appendChild(makeGroupReset(grp.group, function () {
+      grp.items.forEach(function (item) {
+        var s = sliderInputs[item.id];
+        if (!s) return;
+        s.input.value = item.def;
+        state.params[item.id] = item.def;
+        s.refresh();
+      });
+      // Grain defaults match no film stock, so drop the preset back to Custom.
+      if (grp.group === 'Grain') {
+        state.grainStock = 'custom';
+        if (grainStockSelect) grainStockSelect.value = 'custom';
+      }
+      requestRender();
+    }));
     panel.appendChild(h);
     grp.items.forEach(function (item) {
       state.params[item.id] = item.def;

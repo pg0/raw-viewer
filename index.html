@@ -6575,12 +6575,17 @@ var faceAiBusy = false;
 async function faceAiSolve(btnId, target, lo, hi, shut, arch) {
   var faces = (faceState.detGen === state.texGen) ? faceState.faces : null;
   var btn = document.getElementById(btnId);
-  if (!faces || !faces.length || faceAiBusy) return;
+  if (faceAiBusy) return;
+  if (!faces || !faces.length) { toast('Detect faces first'); return; }
   // Same rule as the protect row: a selected face is the only one edited.
   var sel = faceSelectedFace();
   var work = sel ? [sel] : faces;
   faceAiBusy = true;
-  btn.disabled = true;
+  // All three solve buttons share faceAiBusy - with the other two left
+  // enabled, clicking them mid-solve was a silent no-op.
+  var allBtns = ['btnFaceAiSmile', 'btnFaceNeutralSmile', 'btnFaceModelSmile']
+    .map(function (id) { return document.getElementById(id); });
+  allBtns.forEach(function (b) { b.disabled = true; });
   var label = btn.textContent;
   btn.textContent = 'Solving...';
   function put(f, s) {
@@ -6645,7 +6650,7 @@ async function faceAiSolve(btnId, target, lo, hi, shut, arch) {
     toast('Solve failed: ' + (e.message || e));
   } finally {
     faceAiBusy = false;
-    btn.disabled = false;
+    allBtns.forEach(function (b) { b.disabled = false; });
     btn.textContent = label;
   }
 }
@@ -7554,6 +7559,10 @@ function faceProtectCanvas(W, H) {
   faceState.faces.forEach(function (f) {
     var cf = faceSealAmount(f);
     if (cf < 0.05 || !faceMorphActive(f)) return;
+    // Blur / mosaic / smiley cover the mouth entirely - they are painted
+    // above, so a seam stroke here would sit sharp on top of the cover.
+    var pm = faceProtMode(f);
+    if (pm === 'blur' || pm === 'mosaic' || pm === 'smiley') return;
     var c = faceSmileControls(f, W, H);
     if (!c) return;
     // The line only exists to cover the collapsed aperture. A mouth that was
@@ -7588,7 +7597,7 @@ function faceProtectCanvas(W, H) {
     if (det2) {
       var rgb = faceRegionRGB(det2, f.lm[17].x, f.lm[17].y,
         Math.max(2, c.mw * 0.06 * det2.w / W));
-      var dk = [0.74, 0.5, 0.5];
+      var dk = [0.68, 0.45, 0.45];
       var s2 = rgb.map(function (v, i2) {
         return Math.round(255 * Math.pow(v, 1 / 2.2) * dk[i2]);
       });
@@ -7615,9 +7624,12 @@ function faceProtectCanvas(W, H) {
     // sits exactly on the contact line, so that is all the cover needed.
     // Fully opaque core: at 0.85 white teeth still ghosted through as light
     // specks along the line. The blur alone softens the edges.
-    ctx.filter = 'blur(' + Math.max(0.5, c.mw * 0.02).toFixed(2) + 'px)';
+    // Width tapers sublinearly: 7% of the mouth is right on small faces
+    // (2px on a 30px mouth) but paints a lipstick band on close-ups - the
+    // real contact shadow does not grow linearly with the mouth.
+    ctx.filter = 'blur(' + Math.max(0.5, Math.min(c.mw * 0.02, 1 + c.mw * 0.01)).toFixed(2) + 'px)';
     ctx.strokeStyle = col + cf.toFixed(3) + ')';
-    ctx.lineWidth = Math.max(1, c.mw * 0.07);
+    ctx.lineWidth = Math.max(1, Math.min(c.mw * 0.07, 3 + c.mw * 0.028));
     seamPath();
     ctx.stroke();
     ctx.filter = 'none';

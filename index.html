@@ -391,6 +391,9 @@
   }
   .slider-head .val { color: #7fb3e6; font-variant-numeric: tabular-nums; }
   select.grain-type { width: 100%; background: #333; color: #ddd; border: 1px solid #444; border-radius: 5px; padding: 4px 6px; font-size: 11px; font-family: inherit; cursor: pointer; }
+  .exp-size-inputs { display: flex; gap: 6px; align-items: center; margin-top: 6px; }
+  .exp-size-inputs input[type=number] { width: 82px; background: #333; color: #ddd; border: 1px solid #444; border-radius: 5px; padding: 4px 6px; font-size: 11px; font-family: inherit; }
+  .exp-size-inputs .exp-x { color: #888; font-size: 11px; }
   input[type=range] {
     width: 100%;
     height: 18px;
@@ -926,6 +929,20 @@
       <div class="slider-row">
         <div class="slider-head"><span>Quality</span><span class="val" id="qualVal">95</span></div>
         <input type="range" id="quality" min="60" max="100" step="1" value="95">
+      </div>
+      <div class="slider-row">
+        <div class="slider-head"><span>Size</span><span class="val" id="expSizeVal">Original</span></div>
+        <select id="expSizeMode" class="grain-type" title="Output size of the exported JPEG. Downscale only - a target larger than the image exports at original size. Exact size fits inside the given box, aspect ratio kept.">
+          <option value="orig">Original size</option>
+          <option value="long">Longest side (px)</option>
+          <option value="mpx">Megapixels</option>
+          <option value="wh">Exact size (px)</option>
+        </select>
+        <div class="exp-size-inputs" id="expSizeInputs" hidden>
+          <input type="number" id="expSizeA" min="1" step="1">
+          <span class="exp-x" id="expSizeX" hidden>&times;</span>
+          <input type="number" id="expSizeB" min="1" step="1" hidden>
+        </div>
       </div>
       <p class="hint">Use "Save JPEG" in the top bar to export.</p>
     </details>
@@ -2322,11 +2339,43 @@ function dispCropToTex(crop, rot) {
 function rotQuarter() {
   return (((Math.round(state.angleDeg / 90) % 4) + 4) % 4);
 }
-// True when the display angle is (close to) a multiple of 90 - crop is only
-// meaningful there because the crop rect maps axis-aligned to the texture.
+// True when the display angle is (close to) a multiple of 90.
 function isOrthogonal() {
   var m = ((state.angleDeg % 90) + 90) % 90;
   return m < 0.01 || m > 89.99;
+}
+
+/* View parameters shared by the base quad, the overlays and the face
+ * projection: texture window, fit scale and pan offset for an angle + crop.
+ * At orthogonal angles the crop is a texture window (axis-aligned there).
+ * At a free angle it is a window on the ROTATED BOUNDING BOX - the standard
+ * straighten-then-cut-the-corners move: the texture is sampled in full, and
+ * the window is realized as a tighter fit scale plus a centre offset on the
+ * pan, so neither the shaders nor the quad geometry change. */
+function viewFit(vpAspect, angleDeg, crop, letterbox, flipY, zoom) {
+  var m = ((angleDeg % 90) + 90) % 90;
+  var orth = m < 0.01 || m > 89.99;
+  var rotQ = (((Math.round(angleDeg / 90) % 4) + 4) % 4);
+  var angleRad = -angleDeg * Math.PI / 180;
+  var bc = (orth || !crop || (crop.w === 1 && crop.h === 1)) ? null : crop;
+  var tc = dispCropToTex(bc ? { x: 0, y: 0, w: 1, h: 1 } : (crop || { x: 0, y: 0, w: 1, h: 1 }), rotQ);
+  var A = (state.texW * tc.w) / (state.texH * tc.h);
+  var ca = Math.abs(Math.cos(angleRad)), sa = Math.abs(Math.sin(angleRad));
+  var bhx = A * ca + sa, bhy = A * sa + ca;
+  var cw = bc ? bc.w : 1, ch = bc ? bc.h : 1;
+  var k = letterbox
+    ? Math.min(vpAspect / (bhx * cw), 1 / (bhy * ch))
+    : Math.max(vpAspect / (bhx * cw), 1 / (bhy * ch));
+  var px = 0, py = 0;
+  if (bc) {
+    // Crop-centre offset in rotated-bbox units -> clip space (post scale/zoom),
+    // so zoom keeps centring on the crop, not on the full bbox.
+    var cxu = (bc.x + bc.w / 2 - 0.5) * 2 * bhx;
+    var cyu = -(bc.y + bc.h / 2 - 0.5) * 2 * bhy;   // crop y runs top-down
+    px = -cxu * (k / vpAspect) * (zoom || 1);
+    py = -cyu * (k * flipY) * (zoom || 1);
+  }
+  return { tc: tc, A: A, angleRad: angleRad, k: k, panX: px, panY: py };
 }
 
 /* ---- Denoise a-trous pipeline: two RGBA16F ping-pong targets sized to the
@@ -2369,6 +2418,7 @@ function computeDenoise() {
   if (!ensureDnTargets(w, h)) return;   // float FBO unsupported -> skip
   var p = state.params;
   var sig = [state.texGen, w, h, p.nrLuma, p.nrColor, faceDnKey()].join(':');
+  dnSrcAtBuild = faceSrcTex();   // sig covers the face source, so this holds on a cache hit too
   if (sig === dnSig) { dnActiveTex = dnB.tex; return; }   // cached
   var sigL = 0.115;                                 // fixed perceptual luma edge-stop
   var phiL = 0.5 / (sigL * sigL);
@@ -2416,10 +2466,21 @@ function computeDenoise() {
 // Smile Detect output slot in the pipeline chain: base -> face bake -> denoise
 // -> grade. Set by computeFace(), cleared when no face edit is active.
 var faceActiveTex = null;
-function faceSrcTex() { return faceActiveTex || state.tex; }
+// Per A/B side: the Face group can be on in one view and off in the other -
+// the bake is one shared texture, the side with the group off gets the raw
+// base. Outside a compare abGroupOn('Face') is just the live toggle.
+function faceSrcTex() {
+  return (faceActiveTex && abGroupOn('Face')) ? faceActiveTex : state.tex;
+}
 // The texture the grade samples: denoised when denoise is active, else the
-// face-baked base, else the raw.
-function gradeSrcTex() { return dnActiveTex || faceSrcTex(); }
+// face-baked base, else the raw. The denoise output embeds whatever face
+// source it was built over - a compare side whose face source differs from
+// that build must fall back to the un-denoised source.
+var dnSrcAtBuild = null;
+function gradeSrcTex() {
+  if (dnActiveTex && faceSrcTex() === dnSrcAtBuild) return dnActiveTex;
+  return faceSrcTex();
+}
 
 function drawQuad(vpW, vpH, angleDeg, flipY, letterbox, zoom, pan, crop, effects) {
   crop = crop || { x: 0, y: 0, w: 1, h: 1 };
@@ -2448,30 +2509,18 @@ function drawQuad(vpW, vpH, angleDeg, flipY, letterbox, zoom, pan, crop, effects
     gl.uniform1f(uni.lut[s].size, lut ? lut.size : 1);
     gl.uniform1f(uni.lut[s].inten, abLutInt(s));
   }
-  var angleRad = -angleDeg * Math.PI / 180; // negative = clockwise on screen
-  var rotQ = (((Math.round(angleDeg / 90) % 4) + 4) % 4);
-  // Crop maps axis-aligned to the texture only at orthogonal angles; dispCropToTex
-  // with a full crop returns full for any rotQ, so this is safe when tilted.
-  var tc = dispCropToTex(crop, rotQ);
-  gl.uniform1f(uni.rot, angleRad);
-  gl.uniform2f(uni.cropOrigin, tc.x, tc.y);
-  gl.uniform2f(uni.cropSize, tc.w, tc.h);
   // Image rectangle (pre-rotation) half-extents = (aspect, 1); rotation then the
-  // fit scale below map its bounding box into the viewport (letterbox = contain,
-  // otherwise cover). This keeps the image undistorted at any angle.
-  var A = (state.texW * tc.w) / (state.texH * tc.h);
-  var ca = Math.abs(Math.cos(angleRad));
-  var sa = Math.abs(Math.sin(angleRad));
-  var bboxHX = A * ca + sa;
-  var bboxHY = A * sa + ca;
+  // fit scale map its bounding box (or the free-angle crop window on it) into
+  // the viewport (letterbox = contain, otherwise cover). Undistorted at any angle.
   var vpAspect = vpW / vpH;
-  var k = letterbox
-    ? Math.min(vpAspect / bboxHX, 1 / bboxHY)
-    : Math.max(vpAspect / bboxHX, 1 / bboxHY);
-  gl.uniform2f(uni.imgHalf, A, 1);
-  gl.uniform2f(uni.scale, k / vpAspect, k * flipY);
+  var vf = viewFit(vpAspect, angleDeg, crop, letterbox, flipY, zoom || 1);
+  gl.uniform1f(uni.rot, vf.angleRad);
+  gl.uniform2f(uni.cropOrigin, vf.tc.x, vf.tc.y);
+  gl.uniform2f(uni.cropSize, vf.tc.w, vf.tc.h);
+  gl.uniform2f(uni.imgHalf, vf.A, 1);
+  gl.uniform2f(uni.scale, vf.k / vpAspect, vf.k * flipY);
   gl.uniform1f(uni.zoom, zoom || 1);
-  gl.uniform2f(uni.pan, pan ? pan[0] : 0, pan ? pan[1] : 0);
+  gl.uniform2f(uni.pan, (pan ? pan[0] : 0) + vf.panX, (pan ? pan[1] : 0) + vf.panY);
   gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
 }
 
@@ -2490,20 +2539,15 @@ function setOverlayBlend(mode) {
 function drawOverlays(vpW, vpH, angleDeg, flipY, zoom, pan, crop) {
   if (!state.overlays.length) return;
   crop = crop || { x: 0, y: 0, w: 1, h: 1 };
-  var angleRad = -angleDeg * Math.PI / 180;
-  var rotQ = (((Math.round(angleDeg / 90) % 4) + 4) % 4);
-  var tc = dispCropToTex(crop, rotQ);
-  var A = (state.texW * tc.w) / (state.texH * tc.h);
-  var ca = Math.abs(Math.cos(angleRad));
-  var sa = Math.abs(Math.sin(angleRad));
-  var bboxHX = A * ca + sa, bboxHY = A * sa + ca;
   var vpAspect = vpW / vpH;
-  var k = Math.min(vpAspect / bboxHX, 1 / bboxHY); // contain (match base letterbox)
+  var vf = viewFit(vpAspect, angleDeg, crop, true, flipY, zoom || 1); // contain (match base)
+  var A = vf.A, k = vf.k, angleRad = vf.angleRad;
+  var panX = (pan ? pan[0] : 0) + vf.panX, panY = (pan ? pan[1] : 0) + vf.panY;
   // Cache the screen-render projection so the transform gizmo can map
   // image-local coordinates to screen pixels.
   if (flipY === 1) {
     ovView = { A: A, k: k, vpAspect: vpAspect, angleRad: angleRad, zoom: zoom || 1,
-      panX: pan ? pan[0] : 0, panY: pan ? pan[1] : 0 };
+      panX: panX, panY: panY };
   }
   gl.useProgram(ovProg);
   gl.activeTexture(gl.TEXTURE0);
@@ -2511,7 +2555,7 @@ function drawOverlays(vpW, vpH, angleDeg, flipY, zoom, pan, crop) {
   gl.uniform2f(ovUni.imgHalf, A, 1);
   gl.uniform2f(ovUni.scale, k / vpAspect, k * flipY);
   gl.uniform1f(ovUni.zoom, zoom || 1);
-  gl.uniform2f(ovUni.pan, pan ? pan[0] : 0, pan ? pan[1] : 0);
+  gl.uniform2f(ovUni.pan, panX, panY);
   gl.uniform1i(ovUni.ov, 0);
   gl.enable(gl.BLEND);
   for (var i = 0; i < state.overlays.length; i++) {
@@ -2776,8 +2820,11 @@ function updateHistogram() {
   ensureHistFB();
   gl.bindFramebuffer(gl.FRAMEBUFFER, histFB.fbo);
   gl.viewport(0, 0, HIST_W, HIST_H);
+  // Real angle, not 0: the crop rect lives in display space (quarter-rotated,
+  // or the rotated bbox at a free angle) - at angle 0 it selects a different
+  // region of the texture and the histogram reads pixels the crop excluded.
   var hCrop = state.cropping ? FULL_CROP : state.crop;
-  drawQuad(HIST_W, HIST_H, 0, -1, false, 1, [0, 0], hCrop);
+  drawQuad(HIST_W, HIST_H, state.angleDeg, -1, false, 1, [0, 0], hCrop);
   gl.readPixels(0, 0, HIST_W, HIST_H, gl.RGBA, gl.UNSIGNED_BYTE, histFB.px);
   gl.bindFramebuffer(gl.FRAMEBUFFER, null);
 
@@ -3890,6 +3937,64 @@ function jpegInsertApp1(bytes, segs) {
 /* ============================================================
  * Export JPEG at full texture resolution
  * ============================================================ */
+// Native export dimensions: the rotated bounding box of the (cropped) image.
+// For orthogonal angles this equals the swapped crop dims; for a free angle
+// the tilted corners fall outside the image and are filled black in the FBO.
+function exportOutDims() {
+  var ar = -state.angleDeg * Math.PI / 180;
+  var ca = Math.abs(Math.cos(ar)), sa = Math.abs(Math.sin(ar));
+  if (!isOrthogonal()) {
+    // Free angle: the crop is a window on the rotated bounding box.
+    var bw = state.texW * ca + state.texH * sa;
+    var bh = state.texW * sa + state.texH * ca;
+    return { w: Math.max(1, Math.round(bw * state.crop.w)),
+             h: Math.max(1, Math.round(bh * state.crop.h)) };
+  }
+  var tc = dispCropToTex(state.crop, rotQuarter());
+  var winW = state.texW * tc.w, winH = state.texH * tc.h;
+  return { w: Math.max(1, Math.round(winW * ca + winH * sa)),
+           h: Math.max(1, Math.round(winW * sa + winH * ca)) };
+}
+
+// Export-size row -> target dims, or null for native. Downscale only: an
+// upscale target has no extra pixels to offer and silently blows up the file.
+function exportTargetSize(w, h) {
+  var mode = document.getElementById('expSizeMode').value;
+  if (mode === 'orig') return null;
+  var A = parseFloat(document.getElementById('expSizeA').value);
+  var B = parseFloat(document.getElementById('expSizeB').value);
+  var k = 0;
+  if (mode === 'long') k = A / Math.max(w, h);
+  else if (mode === 'mpx') k = Math.sqrt(A * 1e6 / (w * h));
+  else if (mode === 'wh') k = Math.min(A / w, B / h);   // fit inside, aspect kept
+  if (!isFinite(k) || k <= 0 || k >= 1) return null;
+  return { w: Math.max(1, Math.round(w * k)), h: Math.max(1, Math.round(h * k)) };
+}
+
+// Stepped halving before the final resize: a single drawImage over a large
+// ratio (e.g. 8000 -> 800) aliases even with imageSmoothingQuality high.
+function downscaleCanvas(src, tw, th) {
+  var cur = src;
+  while (cur.width >= tw * 2 && cur.height >= th * 2) {
+    var half = document.createElement('canvas');
+    half.width = Math.max(tw, Math.round(cur.width / 2));
+    half.height = Math.max(th, Math.round(cur.height / 2));
+    var hc = half.getContext('2d');
+    hc.imageSmoothingEnabled = true; hc.imageSmoothingQuality = 'high';
+    hc.drawImage(cur, 0, 0, half.width, half.height);
+    cur = half;
+  }
+  if (cur.width !== tw || cur.height !== th) {
+    var fin = document.createElement('canvas');
+    fin.width = tw; fin.height = th;
+    var fc = fin.getContext('2d');
+    fc.imageSmoothingEnabled = true; fc.imageSmoothingQuality = 'high';
+    fc.drawImage(cur, 0, 0, tw, th);
+    cur = fin;
+  }
+  return cur;
+}
+
 function exportJPEG() {
   if (!gl || !state.tex) return;
   // Export always reflects the current edit (A), never the A/B compare view.
@@ -3897,15 +4002,8 @@ function exportJPEG() {
   abShowing = false;
   // If mid-compare on a different-resolution B, rebind A's cached base texture.
   if (abWas) activateCachedRes(state.fullRes ? 'full' : 'half');
-  // Output = the rotated bounding box of the (cropped) image at native pixels.
-  // For orthogonal angles this equals the swapped crop dims; for a free angle
-  // the tilted corners fall outside the image and are filled black below.
-  var tc = dispCropToTex(state.crop, rotQuarter());
-  var winW = state.texW * tc.w, winH = state.texH * tc.h;
-  var ar = -state.angleDeg * Math.PI / 180;
-  var ca = Math.abs(Math.cos(ar)), sa = Math.abs(Math.sin(ar));
-  var w = Math.max(1, Math.round(winW * ca + winH * sa));
-  var h = Math.max(1, Math.round(winW * sa + winH * ca));
+  var od = exportOutDims();
+  var w = od.w, h = od.h;
 
   computeFace();      // bake Smile Detect into the export at its native resolution
   computeDenoise();   // bake denoise into the export at its native resolution
@@ -3974,6 +4072,11 @@ function exportJPEG() {
   var imgData = new ImageData(new Uint8ClampedArray(px.buffer), w, h);
   ctx.putImageData(imgData, 0, 0);
   px = null;
+
+  // Grade, grain and bake always render at native pixels; only the finished
+  // image is resized, so the look survives the downscale.
+  var tgt = exportTargetSize(w, h);
+  if (tgt) out = downscaleCanvas(out, tgt.w, tgt.h);
 
   var q = parseInt(document.getElementById('quality').value, 10) / 100;
   var name = state.baseName + '.jpg';
@@ -4284,11 +4387,10 @@ function updateRotField() {
 function updateCropAvail() {
   var b = document.getElementById('btnCrop');
   if (!b) return;
-  var ok = !!state.tex && isOrthogonal();
-  b.disabled = !ok;
-  b.title = (state.tex && !isOrthogonal())
-    ? 'Crop is available at 0 / 90 / 180 / 270 degrees'
-    : '';
+  // Any angle: orthogonal crops map to the texture, free-angle crops window
+  // the rotated bounding box (straighten, then cut the corners).
+  b.disabled = !state.tex;
+  b.title = '';
 }
 // Set the free display angle (degrees, any value). Zoom/pan and the crop do not
 // survive a rotation intuitively, so reset them to keep the mapping unambiguous.
@@ -5304,6 +5406,45 @@ qualInput.addEventListener('dblclick', function () {
   document.getElementById('qualVal').textContent = '95';
 });
 
+/* Export size row: mode select + inputs. The val label previews the actual
+ * output dimensions for the current crop/rotation. */
+(function () {
+  var modeSel = document.getElementById('expSizeMode');
+  var inputs = document.getElementById('expSizeInputs');
+  var inA = document.getElementById('expSizeA');
+  var inB = document.getElementById('expSizeB');
+  var x = document.getElementById('expSizeX');
+  var val = document.getElementById('expSizeVal');
+  function sync() {
+    var mode = modeSel.value;
+    inputs.hidden = mode === 'orig';
+    var wh = mode === 'wh';
+    inB.hidden = !wh; x.hidden = !wh;
+    inA.step = mode === 'mpx' ? '0.1' : '1';
+    if (!state.tex) { val.textContent = mode === 'orig' ? 'Original' : ''; return; }
+    var od = exportOutDims();
+    if (mode === 'orig') { val.textContent = od.w + ' x ' + od.h; return; }
+    var t = exportTargetSize(od.w, od.h);
+    // null with a filled input = target at/above native -> exports unscaled
+    val.textContent = t ? (t.w + ' x ' + t.h) : (od.w + ' x ' + od.h);
+  }
+  modeSel.addEventListener('change', function () {
+    // Prefill with the current export size in the new mode's unit - a value
+    // typed for another mode (12 MP) would be nonsense here (12 px).
+    if (state.tex) {
+      var od = exportOutDims();
+      if (modeSel.value === 'long') inA.value = Math.max(od.w, od.h);
+      else if (modeSel.value === 'mpx') inA.value = Math.max(1, Math.round(od.w * od.h / 1e6));
+      else if (modeSel.value === 'wh') { inA.value = od.w; inB.value = od.h; }
+    }
+    sync();
+  });
+  [inA, inB].forEach(function (i) { i.addEventListener('input', sync); });
+  // Crop/rotation can change between visits; refresh the preview on open.
+  document.getElementById('exportpanel').addEventListener('toggle', sync);
+  window.expSizeSync = sync;
+})();
+
 /* Drag & drop over the whole window */
 ['dragenter', 'dragover'].forEach(function (ev) {
   window.addEventListener(ev, function (e) {
@@ -5794,11 +5935,12 @@ var btnCrop = document.getElementById('btnCrop');
 var cropBar = document.getElementById('cropbar');
 var cropBackup = null;
 
-/* On-screen rect (px, within canvaswrap) of the full image at fit, zoom 1 */
+/* On-screen rect (px, within canvaswrap) of the displayed image at fit,
+ * zoom 1. At a free angle that is the rotated bounding box - which is what
+ * the crop tool crops. */
 function fullImageScreenRect() {
   var W = canvasWrap.clientWidth, H = canvasWrap.clientHeight;
-  var rotated = rotQuarter() % 2 === 1;
-  var aspect = (rotated ? state.texH : state.texW) / (rotated ? state.texW : state.texH);
+  var aspect = dispAspect();
   var canvasAspect = W / H;
   var iw, ih;
   if (aspect > canvasAspect) { iw = W; ih = W / aspect; }
@@ -5817,10 +5959,16 @@ function updateCropBox() {
   cropBox.style.height = (c.h * r.h) + 'px';
 }
 
-/* Displayed image aspect (width/height), accounting for 90 deg rotation */
+/* Displayed image aspect (width/height). Orthogonal: the (maybe swapped)
+ * texture aspect. Free angle: the rotated bounding box - crop space there. */
 function dispAspect() {
-  var rotated = rotQuarter() % 2 === 1;
-  return (rotated ? state.texH : state.texW) / (rotated ? state.texW : state.texH);
+  if (isOrthogonal()) {
+    var rotated = rotQuarter() % 2 === 1;
+    return (rotated ? state.texH : state.texW) / (rotated ? state.texW : state.texH);
+  }
+  var ar = state.angleDeg * Math.PI / 180;
+  var ca = Math.abs(Math.cos(ar)), sa = Math.abs(Math.sin(ar));
+  return (state.texW * ca + state.texH * sa) / (state.texW * sa + state.texH * ca);
 }
 
 /* Lock a crop ratio (pixel W:H; 0 = free) and reshape to the largest
@@ -6130,7 +6278,7 @@ var faceConn = null;   // MediaPipe landmark connection sets (mask overlay)
 var FACE_DET_DIM = 2048;
 var faceTarget = null, faceSig = '', faceEditGen = 0;
 // Key for the denoise signature: denoise input changes whenever the bake does.
-function faceDnKey() { return faceActiveTex ? faceSig : 'off'; }
+function faceDnKey() { return (faceSrcTex() === state.tex) ? 'off' : faceSig; }
 
 // Landmark indices (MediaPipe 478-point face mesh; eyes A/B = image left/right
 // for an unmirrored photo - naming is positional, matching is positional too).
@@ -6316,12 +6464,14 @@ function faceRenderStatus(keepSliders) {
   faceRenderDebug();
   if (!faces) {
     el.hidden = true; controls.hidden = true;
-    faceSyncMask();
+    faceSyncScore(null);   // clear the header counts too - they kept showing
+    faceSyncMask();        // the previous image's rating on a new photo
     return;
   }
   if (!faces.length) {
     el.textContent = 'No faces detected.';
     el.hidden = false; controls.hidden = true;
+    faceSyncScore(null);
     faceSyncMask();
     return;
   }
@@ -6334,12 +6484,19 @@ function faceRenderStatus(keepSliders) {
       : f.smilePct >= 15
         ? '<span class="face-warn">slight smile (' + f.smilePct + '%)</span>'
         : '<span class="face-warn">not smiling (' + f.smilePct + '%)</span>';
+    // Delta vs. the original detection marks the faces an edit changed:
+    // green +N% for a boost, gray for a deliberate drop (Neutral/Model).
+    var d = (f.smilePct0 != null && faceMorphActive(f)) ? f.smilePct - f.smilePct0 : 0;
+    var dm = d
+      ? ' <span class="' + (d > 0 ? 'face-open' : 'hint') + '" title="was ' +
+        f.smilePct0 + '% before editing">' + (d > 0 ? '+' : '') + d + '%</span>'
+      : '';
     var ex = f.expr && f.expr !== 'happy'
       ? ' - ' + (f.expr === 'neutral'
           ? '<span class="hint">neutral</span>'
           : '<span class="face-warn">' + f.expr + '</span>')
       : '';
-    return 'Face ' + (i + 1) + ': ' + sm + ' - ' + faceEyesLabel(f.eyes) + ex;
+    return 'Face ' + (i + 1) + ': ' + sm + dm + ' - ' + faceEyesLabel(f.eyes) + ex;
   });
   var summary = (smiling === faces.length
       ? (faces.length === 1 ? 'Smiling' : 'All ' + faces.length + ' smiling')
@@ -6379,7 +6536,7 @@ function faceSyncScore(faces) {
  * values stay untouched, so the warp never feeds back into itself.
  * Split out of faceRefreshAnalysis because AI Smile uses it as its sensor:
  * set sliders -> bake -> measure -> correct. */
-async function faceMeasureBaked() {
+async function faceMeasureBaked(only) {
   var faces = (faceState.detGen === state.texGen) ? faceState.faces : null;
   if (!faces || !faces.length || !faceLandmarker || !gl) return;
   await nextFrame();
@@ -6388,7 +6545,9 @@ async function faceMeasureBaked() {
   var src = document.createElement('canvas');
   src.width = det.w; src.height = det.h;
   src.getContext('2d').putImageData(new ImageData(det.data, det.w, det.h), 0, 0);
-  faces.forEach(function (f) {
+  // Each face costs a full MediaPipe detect on its region - a caller editing
+  // one face passes it in `only` instead of re-measuring the whole group.
+  (only || faces).forEach(function (f) {
     /* Replay the exact framing that found this face, instead of a fresh crop
      * around it. A full-frame re-detect is not a sensor at all - the faces in a
      * photo that needs the tiled scan are invisible to it, so every reading
@@ -6423,24 +6582,33 @@ async function faceMeasureBaked() {
   });
 }
 
-var faceRefreshBusy = false, faceRefreshQueued = false;
-async function faceRefreshAnalysis() {
+var faceRefreshBusy = false, faceRefreshQueued = false, faceRefreshOnly = [];
+function faceRefreshAnalysis(f) {
   // While dragging, coalesce: run one pass at a time and remember that another
   // was asked for, so the numbers keep up without queueing a detect per pixel.
+  // A face argument narrows the pass to that face - re-detecting all N faces
+  // on every tick of one slider made a drag lag for seconds in a group shot.
+  if (!f) faceRefreshOnly = null;                // no face given = refresh everyone
+  else if (faceRefreshOnly && faceRefreshOnly.indexOf(f) < 0) faceRefreshOnly.push(f);
   if (faceRefreshBusy) { faceRefreshQueued = true; return; }
+  faceRefreshRun();
+}
+async function faceRefreshRun() {
   if (!faceLandmarker || !gl) return;
   var faces = (faceState.detGen === state.texGen) ? faceState.faces : null;
   if (!faces || !faces.length) return;
   faceRefreshBusy = true;
   faceRefreshQueued = false;
+  var only = (faceRefreshOnly && faceRefreshOnly.length) ? faceRefreshOnly : null;
+  faceRefreshOnly = [];
   try {
-    await faceMeasureBaked();
+    await faceMeasureBaked(only);
     faceRenderStatus(true);   // stats only - never rebuild the slider being dragged
   } catch (e) {
   } finally {
     faceRefreshBusy = false;
   }
-  if (faceRefreshQueued) faceRefreshAnalysis();
+  if (faceRefreshQueued) faceRefreshRun();
 }
 
 /* One Smile slider per detected face (numbers match the status list and the
@@ -6450,7 +6618,7 @@ function faceBuildSmileSliders() {
   list.innerHTML = '';
   var faces = (faceState.detGen === state.texGen) ? faceState.faces : null;
   if (!faces) return;
-  function mkRow(parent, label, min, max, start, fmt, initial, set) {
+  function mkRow(parent, label, min, max, start, fmt, initial, set, face) {
     var row = document.createElement('div');
     row.className = 'slider-row';
     var head = document.createElement('div');
@@ -6473,9 +6641,9 @@ function faceBuildSmileSliders() {
     val.textContent = fmt(initial);
     inp.addEventListener('input', function () {
       apply(parseInt(inp.value, 10) || 0);
-      faceRefreshAnalysis();     // live stats while dragging (self-coalescing)
+      faceRefreshAnalysis(face); // live stats while dragging (self-coalescing)
     });
-    inp.addEventListener('change', function () { faceRefreshAnalysis(); });
+    inp.addEventListener('change', function () { faceRefreshAnalysis(face); });
     inp.addEventListener('dblclick', function () { apply(start); });
     addDoubleTapReset(inp, function () { apply(start); });
     head.appendChild(lbl);
@@ -6504,24 +6672,24 @@ function faceBuildSmileSliders() {
     // zygomaticus path run backwards. AI MSmile lives in that half.
     mkRow(grid, 'Smile', -100, 150, 0, String,
       Math.round((f.smile || 0) * 100),
-      function (v) { f.smile = v / 100; });
+      function (v) { f.smile = v / 100; }, f);
     mkRow(grid, 'Mouth width', 70, 100, 100, function (v) { return v + ' %'; },
       Math.round((f.width || 1) * 100),
-      function (v) { f.width = v / 100; });
+      function (v) { f.width = v / 100; }, f);
     mkRow(grid, 'Mouth height', 70, 130, 100, function (v) { return v + ' %'; },
       Math.round((f.height || 1) * 100),
-      function (v) { f.height = v / 100; });
+      function (v) { f.height = v / 100; }, f);
     // Whole-mouth shift along the face axis (+ = toward the nose), % of
     // mouth width. For a close result that sits a touch too low or high.
     mkRow(grid, 'Mouth pos Y', -20, 20, 0, function (v) { return v + ' %'; },
       Math.round((f.my || 0) * 100),
-      function (v) { f.my = v / 100; });
+      function (v) { f.my = v / 100; }, f);
     // Positive raises the brows WITH the upper lids - the eyes open and the
     // look lifts (friendliness), the brows stay close to the eyes. A small
     // negative lowers them toward a frown.
     mkRow(grid, 'Brows', -50, 100, 0, String,
       Math.round((f.brow || 0) * 100),
-      function (v) { f.brow = v / 100; });
+      function (v) { f.brow = v / 100; }, f);
     list.appendChild(grid);
   });
   faceSyncProtRow();   // selection changed -> the protect row now targets a face
@@ -6601,7 +6769,7 @@ async function faceAiSolve(btnId, target, lo, hi, shut, arch) {
     if (!faceLandmarker) await loadFaceEngine();
     work.forEach(function (f) { put(f, 0); });
     faceEditGen++;
-    await faceMeasureBaked();               // baseline: what the face does already
+    await faceMeasureBaked(work);           // baseline: what the face does already
     var st = work.map(function (f) {
       var p = f.smilePct || 0;
       var seed = clamp((target - p) / FACE_AI_GAIN);
@@ -6620,7 +6788,7 @@ async function faceAiSolve(btnId, target, lo, hi, shut, arch) {
       });
       if (!moved) break;
       faceEditGen++;
-      await faceMeasureBaked();
+      await faceMeasureBaked(work);
       var again = false;
       work.forEach(function (f, i) {
         var t = st[i];
@@ -6643,7 +6811,7 @@ async function faceAiSolve(btnId, target, lo, hi, shut, arch) {
     // leaving it untouched just because the detector lost it mid-solve.
     work.forEach(function (f, i) { put(f, st[i].tested ? st[i].best : st[i].seed); });
     faceEditGen++;
-    await faceMeasureBaked();               // report the numbers actually on screen
+    await faceMeasureBaked(work);           // report the numbers actually on screen
     faceRenderStatus();
     requestRender();
   } catch (e) {
@@ -6764,7 +6932,8 @@ async function faceDetectRun(deep) {
     }
     var faces = raw.map(function (r) {
       var a = faceAnalyze(r.lm, r.bs, det.w, det.h);
-      return { lm: r.lm, smilePct: a.smilePct, eyes: a.eyes, expr: a.expr,
+      return { lm: r.lm, smilePct: a.smilePct, smilePct0: a.smilePct,
+               eyes: a.eyes, expr: a.expr,
                smile: 0, width: 1, height: 1,
                close: 0, reg: r.reg, measured: true };
     });
@@ -7310,7 +7479,11 @@ function faceProtectActive() {
 }
 
 function faceEditActive() {
-  return !!(state.tex && faceProg && dnFloatOK && groupEnabled.Face &&
+  // Bake when either side of an active A/B compare wants the Face group on -
+  // faceSrcTex() picks per side, so the compare can show edit vs. no-edit.
+  var wantFace = groupEnabled.Face ||
+    (!!abSnapshot && (abShowing || abSplit) && !!abSnapshot.groupEnabled.Face);
+  return !!(state.tex && faceProg && dnFloatOK && wantFace &&
     faceState.faces && faceState.faces.length && faceState.detGen === state.texGen &&
     (faceSmileFaces().length || faceProtectActive() ||
      (faceState.patches && faceState.patches.length && faceState.eyeBlend > 0)));
@@ -7857,15 +8030,11 @@ function faceSyncMask() {
 function faceProjection(zoom, pan, crop) {
   var Wc = canvasWrap.clientWidth, Hc = canvasWrap.clientHeight;
   crop = crop || FULL_CROP;
-  var angleRad = -state.angleDeg * Math.PI / 180;
-  var rotQ = (((Math.round(state.angleDeg / 90) % 4) + 4) % 4);
-  var tc = dispCropToTex(crop, rotQ);
-  var A = (state.texW * tc.w) / (state.texH * tc.h);
-  var ca = Math.abs(Math.cos(angleRad)), sa = Math.abs(Math.sin(angleRad));
   var vpAspect = Wc / Hc;
-  var k = Math.min(vpAspect / (A * ca + sa), 1 / (A * sa + ca));
   var z = zoom || 1;
-  var panX = pan ? pan[0] : 0, panY = pan ? pan[1] : 0;
+  var vf = viewFit(vpAspect, state.angleDeg, crop, true, 1, z);
+  var tc = vf.tc, A = vf.A, k = vf.k, angleRad = vf.angleRad;
+  var panX = (pan ? pan[0] : 0) + vf.panX, panY = (pan ? pan[1] : 0) + vf.panY;
   var cR = Math.cos(angleRad), sR = Math.sin(angleRad);
   return {
     W: Wc, H: Hc,

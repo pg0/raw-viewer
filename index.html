@@ -593,6 +593,17 @@
   /* Transform gizmo (resize + rotate frame) for text/emoji overlays */
   #gizmo { position: absolute; inset: 0; z-index: 7; pointer-events: none; overflow: visible; }
   #gizmo[hidden] { display: none; }
+  #facemask { position: absolute; inset: 0; z-index: 6; pointer-events: none; width: 100%; height: 100%; }
+  #facemask[hidden] { display: none; }
+  .face-open { color: #5fbf6f; }
+  .face-closed { color: #e05252; font-weight: 600; }
+  .face-warn { color: #e8a33d; }
+  .face-maskbtn { padding: 4px 9px; font-size: 11px; }
+  .face-srow { display: grid; grid-template-columns: 1fr 1fr; column-gap: 12px; }
+  .face-flabel { font-size: 11px; color: #9a9a9a; margin: 8px 0 2px; font-weight: 600; cursor: pointer; }
+  /* selected face: bold + accent, matching the highlighted box on the photo */
+  .face-flabel.sel { color: #ffd24a; font-weight: 800; font-size: 12px; }
+  .face-srow.sel { border-left: 2px solid #ffd24a; padding-left: 6px; margin-left: -8px; }
   #gizmo .giz-frame { fill: none; stroke: #4a90d9; stroke-width: 1.4; stroke-dasharray: 5 4; pointer-events: none; }
   #gizmo .giz-handle {
     fill: #fff; stroke: #4a90d9; stroke-width: 1.4;
@@ -654,6 +665,7 @@
       <div id="zoomchip" hidden></div>
       <button id="btn100" hidden title="Toggle 100% (actual pixels) vs fit">100%</button>
       <svg id="gizmo" hidden></svg>
+      <canvas id="facemask" hidden></canvas>
       <button id="btnViewSize" title="Resize photo pane" aria-label="Resize photo pane">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
              stroke-linecap="round" stroke-linejoin="round">
@@ -801,6 +813,59 @@
       <div id="emojipalette" hidden></div>
       <p class="hint" id="overlayMoveHint" hidden>Selected. Drag on the photo to move it.</p>
     </details>
+    <details class="panel" id="facepanel">
+      <summary>Smile Detect</summary>
+      <div class="btnrow">
+        <button id="btnFaceDetect" disabled>Detect faces</button>
+        <button id="btnFaceClear" disabled>Clear</button>
+      </div>
+      <p class="hint">Detects faces locally (MediaPipe WASM): who smiles, whose eyes are open. The Smile slider reshapes every detected mouth; a second photo of the same person can donate open eyes for closed ones. Needs serve.cmd or the live site.</p>
+      <div id="faceStatus" class="hint" hidden></div>
+      <div id="faceControls" hidden>
+        <div class="btnrow face-maskrow">
+          <button class="face-maskbtn" data-maskmode="none">None</button>
+          <button class="face-maskbtn active" data-maskmode="box">Box</button>
+          <button class="face-maskbtn" data-maskmode="mesh">Mask</button>
+          <button class="face-maskbtn" data-maskmode="eyesmouth">Eyes+mouth</button>
+        </div>
+        <div id="faceSmileList"></div>
+        <div class="btnrow"><button id="btnFaceDonor">Closed Eye Photo</button></div>
+        <p class="hint" id="faceDonorInfo" hidden></p>
+        <div class="slider-row" id="faceEyeRow" hidden>
+          <div class="slider-head"><span>Eye blend</span><span class="val" id="faceEyeVal">100 %</span></div>
+          <input type="range" id="faceEyeBlend" min="0" max="100" step="1" value="100">
+        </div>
+        <div id="faceEyeAdj" hidden>
+          <div class="slider-row">
+            <div class="slider-head"><span>Eye size</span><span class="val" id="faceEyeSizeVal">100 %</span></div>
+            <input type="range" id="faceEyeSize" min="70" max="130" step="1" value="100">
+          </div>
+          <div class="slider-row">
+            <div class="slider-head"><span>Eye direction X</span><span class="val" id="faceEyeDirXVal">0</span></div>
+            <input type="range" id="faceEyeDirX" min="-30" max="30" step="1" value="0">
+          </div>
+          <div class="slider-row">
+            <div class="slider-head"><span>Eye direction Y</span><span class="val" id="faceEyeDirYVal">0</span></div>
+            <input type="range" id="faceEyeDirY" min="-30" max="30" step="1" value="0">
+          </div>
+        </div>
+      </div>
+      <details id="faceAdvanced" hidden>
+        <summary class="hint">Advanced</summary>
+        <div class="btnrow"><button id="btnFaceDeep">Deep scan (tiled)</button></div>
+        <p class="hint">Re-scans in 4 overlapping 2x-zoomed tiles - finds small or tilted faces the full-frame pass misses. Slower.</p>
+        <p class="hint" id="faceDebug"></p>
+        <div class="face-flabel">MediaPipe tasks</div>
+        <div class="btnrow">
+          <button class="face-maskbtn" id="btnMpObjects">Objects</button>
+          <button class="face-maskbtn" id="btnMpSeg">Segments</button>
+          <button class="face-maskbtn" id="btnMpPose">Pose</button>
+          <button class="face-maskbtn" id="btnMpHands">Hands</button>
+        </div>
+        <p class="hint">Object detection, person segmentation (hair / skin / clothes), body pose (33 points) and hands (21 per hand) - each toggles its overlay and loads its model on first use.</p>
+        <p class="hint" id="mpInfo" hidden></p>
+      </details>
+    </details>
     <div class="panel">
       <h3>Export</h3>
       <div class="slider-row">
@@ -895,6 +960,7 @@
   accept=".arw,.cr2,.cr3,.nef,.nrw,.dng,.raf,.orf,.rw2,.raw,.pef,.srw,.srf,.sr2,.kdc,.dcr,.mrw,.3fr,.erf,.mef,.mos,.x3f,.gpr,.rwl,.iiq,.cap,.fff,.arq,.jpg,.jpeg,.png,.webp,.bmp,.gif,.heic,.heif,.tif,.tiff">
 <input type="file" id="lutinput" hidden accept=".cube">
 <input type="file" id="overlayinput" hidden accept="image/*,.svg,image/svg+xml">
+<input type="file" id="facedonorinput" hidden accept="image/jpeg,image/png,image/webp">
 
 <script src="dcraw.js"></script>
 <script src="libheif.js"></script>
@@ -1763,6 +1829,88 @@ var DN_COMBINE_FRAG = [
 
 var dnProg = null, dnUni = {}, dncProg = null, dncUni = {};
 
+/* ============================================================
+ * Smile Detect face bake: a pre-grade pass on the linear source, like denoise.
+ * 1. Eye donor patch (this shader): sample a second photo through a per-eye
+ *    similarity transform (complex-number form) and blend it inside a
+ *    feathered, rotated ellipse over the closed eye. Donor is uploaded
+ *    linear, gain pre-matched on the CPU, so it composites in linear light.
+ *    With u_eyeN = 0 this is a plain copy (used as the pass-2 base blit).
+ * 2. Smile morph (FACEGRID program below): per-face MLS mesh warp - the
+ *    outer-lip landmark ring gets smile-displaced target positions, a
+ *    moving-least-squares similarity field is solved per grid vertex on the
+ *    CPU, and the displaced grid re-renders the mouth region.
+ * ============================================================ */
+var FACE_MAX_EYES = 8;
+var FACE_FRAG = [
+  '#version 300 es',
+  'precision highp float;',
+  'precision highp int;',
+  'in vec2 v_uv;',
+  'out vec4 frag;',
+  'uniform sampler2D u_src;',
+  'uniform sampler2D u_donor;',
+  'uniform vec2 u_size;',        // base texture size (px)
+  'uniform vec2 u_donorSize;',   // donor texture size (px)
+  'uniform int u_eyeN;',
+  'uniform vec4 u_eyeT[' + FACE_MAX_EYES + '];',   // similarity: t.re, t.im, d0.x, d0.y (donor px)
+  'uniform vec2 u_eyeB[' + FACE_MAX_EYES + '];',   // base anchor b0 (px)
+  'uniform vec4 u_eyeE[' + FACE_MAX_EYES + '];',   // ellipse: cx, cy, semi-a, semi-b (px)
+  'uniform vec2 u_eyeAux[' + FACE_MAX_EYES + '];', // ellipse angle (rad), donor gain
+  'uniform float u_eyeBlend;',
+  'uniform vec3 u_eyeAdj;',      // user tweak: size factor, dir X, dir Y (eye widths)
+  'void main() {',
+  '  vec2 p = v_uv * u_size;',
+  '  vec4 c = texture(u_src, v_uv);',
+  '  for (int i = 0; i < ' + FACE_MAX_EYES + '; i++) {',
+  '    if (i >= u_eyeN) break;',
+  '    vec2 e = p - u_eyeE[i].xy;',
+  '    float ca = cos(u_eyeAux[i].x), sa = sin(u_eyeAux[i].x);',
+  '    vec2 le = vec2(ca * e.x + sa * e.y, -sa * e.x + ca * e.y) / u_eyeE[i].zw;',
+  '    float m = dot(le, le);',   // < 1 inside the ellipse
+  '    if (m < 1.0) {',
+  '      float a = (1.0 - smoothstep(0.30, 1.0, m)) * u_eyeBlend;',
+  // size scales the donor content around the eye center; direction shifts it
+  // along/across the eye axis (rotated frame, so it follows head roll)
+  '      vec2 ps = u_eyeE[i].xy + e / u_eyeAdj.x',
+  '        - (vec2(ca, sa) * u_eyeAdj.y + vec2(-sa, ca) * u_eyeAdj.z) * u_eyeE[i].z;',
+  '      vec2 pb = ps - u_eyeB[i];',
+  '      vec2 dp = u_eyeT[i].zw + vec2(u_eyeT[i].x * pb.x - u_eyeT[i].y * pb.y,',
+  '                                    u_eyeT[i].y * pb.x + u_eyeT[i].x * pb.y);',
+  '      vec3 dc = texture(u_donor, dp / u_donorSize).rgb * u_eyeAux[i].y;',
+  '      c.rgb = mix(c.rgb, dc, a);',
+  '    }',
+  '  }',
+  '  frag = vec4(c.rgb, 1.0);',
+  '}'
+].join('\n');
+
+// Displaced-grid renderer for the smile morph: vertices carry their warped
+// pixel position + the ORIGINAL sampling UV, so drawing the mesh performs the
+// forward warp with plain bilinear filtering - no per-pixel inverse needed.
+var FACEGRID_VERT = [
+  '#version 300 es',
+  'layout(location = 0) in vec2 a_p;',   // displaced position (px)
+  'layout(location = 1) in vec2 a_uv;',  // source uv (0..1)
+  'uniform vec2 u_size;',
+  'out vec2 v_uv;',
+  'void main() {',
+  '  v_uv = a_uv;',
+  '  gl_Position = vec4(a_p / u_size * 2.0 - 1.0, 0.0, 1.0);',
+  '}'
+].join('\n');
+var FACEGRID_FRAG = [
+  '#version 300 es',
+  'precision highp float;',
+  'in vec2 v_uv;',
+  'out vec4 frag;',
+  'uniform sampler2D u_src;',
+  'void main() { frag = vec4(texture(u_src, v_uv).rgb, 1.0); }'
+].join('\n');
+
+var faceProg = null, faceUni = {}, faceDummyDonor = null;
+var faceGridProg = null, faceGridUni = {}, faceGridVao = null, faceGridVbo = null, faceGridIbo = null;
+
 function compileShader(type, src) {
   var sh = gl.createShader(type);
   gl.shaderSource(sh, src);
@@ -1913,6 +2061,69 @@ function initGL() {
   gl.useProgram(dncProg);
   gl.uniform1i(dncUni.denoised, 0);
   gl.uniform1i(dncUni.orig, 5);
+
+  // Smile Detect face bake program (shares the quad; src unit 0, donor unit 5).
+  faceProg = gl.createProgram();
+  gl.attachShader(faceProg, compileShader(gl.VERTEX_SHADER, DN_VERT));
+  gl.attachShader(faceProg, compileShader(gl.FRAGMENT_SHADER, FACE_FRAG));
+  gl.linkProgram(faceProg);
+  if (!gl.getProgramParameter(faceProg, gl.LINK_STATUS)) {
+    throw new Error('Face program: ' + gl.getProgramInfoLog(faceProg));
+  }
+  faceUni = {
+    src: gl.getUniformLocation(faceProg, 'u_src'),
+    donor: gl.getUniformLocation(faceProg, 'u_donor'),
+    size: gl.getUniformLocation(faceProg, 'u_size'),
+    donorSize: gl.getUniformLocation(faceProg, 'u_donorSize'),
+    eyeN: gl.getUniformLocation(faceProg, 'u_eyeN'),
+    eyeT: gl.getUniformLocation(faceProg, 'u_eyeT'),
+    eyeB: gl.getUniformLocation(faceProg, 'u_eyeB'),
+    eyeE: gl.getUniformLocation(faceProg, 'u_eyeE'),
+    eyeAux: gl.getUniformLocation(faceProg, 'u_eyeAux'),
+    eyeBlend: gl.getUniformLocation(faceProg, 'u_eyeBlend'),
+    eyeAdj: gl.getUniformLocation(faceProg, 'u_eyeAdj')
+  };
+  gl.useProgram(faceProg);
+  gl.uniform1i(faceUni.src, 0);
+  gl.uniform1i(faceUni.donor, 5);
+  // 1x1 dummy donor so the sampler is always valid, even with no eye patches.
+  faceDummyDonor = gl.createTexture();
+  gl.activeTexture(gl.TEXTURE0 + 5);
+  gl.bindTexture(gl.TEXTURE_2D, faceDummyDonor);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE,
+    new Uint8Array([0, 0, 0, 255]));
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.activeTexture(gl.TEXTURE0);
+
+  // Smile-morph grid program + its own VAO (displaced position px + source uv).
+  faceGridProg = gl.createProgram();
+  gl.attachShader(faceGridProg, compileShader(gl.VERTEX_SHADER, FACEGRID_VERT));
+  gl.attachShader(faceGridProg, compileShader(gl.FRAGMENT_SHADER, FACEGRID_FRAG));
+  gl.linkProgram(faceGridProg);
+  if (!gl.getProgramParameter(faceGridProg, gl.LINK_STATUS)) {
+    throw new Error('Face grid program: ' + gl.getProgramInfoLog(faceGridProg));
+  }
+  faceGridUni = {
+    src: gl.getUniformLocation(faceGridProg, 'u_src'),
+    size: gl.getUniformLocation(faceGridProg, 'u_size')
+  };
+  gl.useProgram(faceGridProg);
+  gl.uniform1i(faceGridUni.src, 0);
+  var prevVaoInit = gl.getParameter(gl.VERTEX_ARRAY_BINDING);
+  faceGridVao = gl.createVertexArray();
+  gl.bindVertexArray(faceGridVao);
+  faceGridVbo = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, faceGridVbo);
+  gl.enableVertexAttribArray(0);
+  gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 16, 0);
+  gl.enableVertexAttribArray(1);
+  gl.vertexAttribPointer(1, 2, gl.FLOAT, false, 16, 8);
+  faceGridIbo = gl.createBuffer();
+  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, faceGridIbo);   // element binding is VAO state
+  gl.bindVertexArray(prevVaoInit);
+  gl.bindBuffer(gl.ARRAY_BUFFER, null);
+
   // Rendering into RGBA16F needs this extension; without it, denoise stays off
   // (denoiseActive() checks the flag) so highlights are never clamped in RGBA8.
   dnFloatOK = !!gl.getExtension('EXT_color_buffer_float');
@@ -2058,7 +2269,7 @@ function computeDenoise() {
   var w = state.texW, h = state.texH;
   if (!ensureDnTargets(w, h)) return;   // float FBO unsupported -> skip
   var p = state.params;
-  var sig = [state.texGen, w, h, p.nrLuma, p.nrColor].join(':');
+  var sig = [state.texGen, w, h, p.nrLuma, p.nrColor, faceDnKey()].join(':');
   if (sig === dnSig) { dnActiveTex = dnB.tex; return; }   // cached
   var sigL = 0.115;                                 // fixed perceptual luma edge-stop
   var phiL = 0.5 / (sigL * sigL);
@@ -2072,7 +2283,7 @@ function computeDenoise() {
   gl.uniform1f(dnUni.phiL, phiL);
   gl.uniform1f(dnUni.phiC, phiC);
   var targets = [dnA, dnB];
-  var srcTex = state.tex;
+  var srcTex = faceSrcTex();   // denoise the face-baked base when Smile Detect is active
   var PASSES = 5;
   for (var i = 0; i < PASSES; i++) {
     var wr = targets[i % 2];
@@ -2094,7 +2305,7 @@ function computeDenoise() {
   gl.activeTexture(gl.TEXTURE0);
   gl.bindTexture(gl.TEXTURE_2D, denoisedTex);
   gl.activeTexture(gl.TEXTURE0 + 5);
-  gl.bindTexture(gl.TEXTURE_2D, state.tex);
+  gl.bindTexture(gl.TEXTURE_2D, faceSrcTex());
   gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
   gl.activeTexture(gl.TEXTURE0 + 5);
   gl.bindTexture(gl.TEXTURE_2D, null);
@@ -2103,8 +2314,13 @@ function computeDenoise() {
   dnActiveTex = combineTarget.tex;
   dnSig = sig;
 }
-// The texture the grade samples: denoised when denoise is active, else the raw.
-function gradeSrcTex() { return dnActiveTex || state.tex; }
+// Smile Detect output slot in the pipeline chain: base -> face bake -> denoise
+// -> grade. Set by computeFace(), cleared when no face edit is active.
+var faceActiveTex = null;
+function faceSrcTex() { return faceActiveTex || state.tex; }
+// The texture the grade samples: denoised when denoise is active, else the
+// face-baked base, else the raw.
+function gradeSrcTex() { return dnActiveTex || faceSrcTex(); }
 
 function drawQuad(vpW, vpH, angleDeg, flipY, letterbox, zoom, pan, crop, effects) {
   crop = crop || { x: 0, y: 0, w: 1, h: 1 };
@@ -2383,6 +2599,7 @@ function renderSplit(z, p, crop) {
 function render() {
   if (!gl || !state.tex) return;
   resizeCanvas();
+  computeFace();      // refresh the face-baked base (Smile Detect) if its params changed
   computeDenoise();   // refresh the denoised source texture if denoise params changed
   // While the crop tool is active, show the whole image at fit (the crop
   // rectangle is an HTML overlay); otherwise render the committed crop.
@@ -2420,6 +2637,7 @@ function render() {
   updateZoomChip();
   updateCropBox();
   updateGizmo();
+  if (typeof drawFaceMask === 'function') drawFaceMask(z, p, activeCrop);
   scheduleHistogram();
 }
 
@@ -2552,6 +2770,13 @@ function setControlsEnabled(on) {
   document.getElementById('btnAddText').disabled = !on;
   document.getElementById('btnAddEmoji').disabled = !on;
   document.getElementById('chkFullRes').disabled = !on;
+  document.getElementById('btnFaceDetect').disabled = !on;
+  document.getElementById('btnFaceClear').disabled = !on;
+  document.getElementById('btnFaceDeep').disabled = !on;
+  ['Pose', 'Hands', 'Seg', 'Objects'].forEach(function (n) {
+    var b = document.getElementById('btnMp' + n);
+    if (b) b.disabled = !on;
+  });
   syncFullResRow();
   var b100 = document.getElementById('btn100');
   if (b100) b100.hidden = !on;
@@ -2559,6 +2784,9 @@ function setControlsEnabled(on) {
   updateRotField();           // controls enable right after a fresh load (angle reset to 0)
   if (on) updateCropAvail();  // refine the Crop button by orthogonality
   updateTopbarChips();
+  // New photo with the Smile Detect panel open: redetect right away (the
+  // detGen guard makes this a no-op on resolution switches of the same image).
+  if (on && typeof faceMaybeAutoDetect === 'function') faceMaybeAutoDetect();
 }
 
 /* The "Full resolution" toggle only makes sense behind a RAW; hide the whole
@@ -2611,7 +2839,7 @@ async function applyFullRes(want) {
 /* Slider construction */
 var sliderInputs = {};
 // Per-group bypass (eye toggle). A disabled group renders its params at default.
-var groupEnabled = { Light: true, Color: true, Effects: true, Denoise: true, Grain: true, LUT: true };
+var groupEnabled = { Light: true, Color: true, Effects: true, Denoise: true, Grain: true, LUT: true, Face: true };
 var eyeSyncs = [];        // per-eye refresh fns, so undo/redo can resync every eye button
 var PARAM_GROUP = {}, PARAM_DEF = {};
 var groupTitleEls = {};   // group name -> its title <span> (for the A/B "changed" marker)
@@ -2909,19 +3137,19 @@ var toneModeSelect = null;
   toneModeSelect = sel;
 })();
 
-// LUT panel is static HTML; give its header the same eye toggle.
-(function () {
-  var sum = document.querySelector('#lutpanel > summary');
-  if (sum) {
-    var txt = document.createElement('span');
-    txt.className = 'grp-name';
-    txt.textContent = sum.textContent.trim();
-    groupTitleEls['LUT'] = txt;
-    sum.textContent = '';
-    sum.appendChild(makeEye('LUT'));
-    sum.appendChild(txt);
-  }
-})();
+// LUT and Smile Detect panels are static HTML; give their headers the same
+// eye toggle (bypasses the whole face bake - eye patches and morphs).
+[['#lutpanel > summary', 'LUT'], ['#facepanel > summary', 'Face']].forEach(function (spec) {
+  var sum = document.querySelector(spec[0]);
+  if (!sum) return;
+  var txt = document.createElement('span');
+  txt.className = 'grp-name';
+  txt.textContent = sum.textContent.trim();
+  groupTitleEls[spec[1]] = txt;
+  sum.textContent = '';
+  sum.appendChild(makeEye(spec[1]));
+  sum.appendChild(txt);
+});
 
 function resetAllSliders() {
   if (typeof captureAbBefore === 'function' && !abShowing) captureAbBefore();
@@ -3239,9 +3467,11 @@ async function loadRasterImage(file) {
       data[o++] = 1;
     }
     state.rawBytes = null; // raster images cannot be re-decoded at full res
+    state.texGen++;        // new image: cached detections/denoise keyed on texGen go stale
     state.baseName = file.name.replace(/\.[^.]+$/, '') || 'export';
     state.fileName = file.name;
     if (typeof histClear === 'function') histClear();   // undo history is per-image
+    if (typeof faceNewImage === 'function') faceNewImage();   // detection is per-image (donor survives)
     state.angleDeg = 0;
     state.zoom = 1;
     state.pan = [0, 0];
@@ -3296,6 +3526,7 @@ async function loadFile(file) {
   state.rawBytes = bytes;
   state.texGen++;   // new image: previous cached-resolution textures become stale
   if (typeof histClear === 'function') histClear();   // undo history is per-image
+  if (typeof faceNewImage === 'function') faceNewImage();   // detection is per-image (donor survives)
   state.baseName = file.name.replace(/\.[^.]+$/, '') || 'export';
   state.fileName = file.name;
   state.angleDeg = 0;
@@ -3436,6 +3667,7 @@ function exportJPEG() {
   var w = Math.max(1, Math.round(winW * ca + winH * sa));
   var h = Math.max(1, Math.round(winW * sa + winH * ca));
 
+  computeFace();      // bake Smile Detect into the export at its native resolution
   computeDenoise();   // bake denoise into the export at its native resolution
 
   var tex = gl.createTexture();
@@ -5232,6 +5464,14 @@ function releasePointer(e) {
   if (activePointers.size === 1 && (overlaySelected() || state.zoom > 1)) canvasWrap.classList.add('panning');
   else canvasWrap.classList.remove('panning');
   if (activePointers.size === 0) {
+    // A tap (no drag) on a detected face selects it (mask + panel label).
+    if (tapInfo && !tapInfo.moved && typeof faceSelectAt === 'function') {
+      var rectF = canvasWrap.getBoundingClientRect();
+      if (faceSelectAt(e.clientX - rectF.left, e.clientY - rectF.top)) {
+        tapInfo = null;
+        return;
+      }
+    }
     // A tap (no drag) outside the selected sticker deselects it.
     var ov = state.selectedOverlay != null ? state.overlays[state.selectedOverlay] : null;
     if (tapInfo && !tapInfo.moved && ov && isSticker(ov)) {
@@ -5572,6 +5812,1379 @@ supportModalInput.addEventListener('keydown', function (e) {
   if (e.key === 'Enter') { e.preventDefault(); trySupportUnlock(); }
   else if (e.key === 'Escape') { e.preventDefault(); closeSupportModal(); }
 });
+
+/* ============================================================
+ * Smile Detect: local face detection (MediaPipe FaceLandmarker WASM,
+ * vendored in face/), smile morph slider, and eye-donor replacement.
+ * Detection runs on an sRGB blit of the ungraded base; landmarks are
+ * stored normalized, so they survive the half/full resolution switch.
+ * The bake itself is computeFace() above the denoise pass.
+ * ============================================================ */
+var faceState = {
+  faces: null,      // [{ lm: [478 pts], smilePct, eyes, smile }] sorted left-to-right; smile = per-face slider (-1..1)
+  detGen: -1,       // texGen the detection belongs to
+  baseDet: null,    // { data, w, h } sRGB detection pixels (donor luma matching)
+  eyeBlend: 1,
+  donor: null,      // { tex, w, h, det, faces } second photo donating open eyes
+  patches: null,    // [{ bLm, dLm, eye, fi }] one per closed base eye with an open donor eye
+  maskMode: 'box',  // overlay: 'none' | 'box' | 'mesh' | 'eyesmouth'
+  selected: -1,     // face index highlighted on the photo + bold in the panel
+  hit: null,        // [{ fi, x0, y0, x1, y1 }] screen-px boxes for click-select
+  debug: null,      // last run's stats for the Advanced section
+  eyeAdj: { s: 1, x: 0, y: 0 }   // donor-eye tweak: size factor, direction X/Y
+};
+var faceLandmarker = null, faceLoadPromise = null;
+var faceConn = null;   // MediaPipe landmark connection sets (mask overlay)
+// Detection input cap: the photo is downscaled to this before it goes into
+// MediaPipe (a full-res RAW never hits the detector raw). Tested 1536: loses
+// borderline small faces (the family-photo toddler) - 2048 is the floor that
+// keeps them, and landmark refinement stays precise for the warp.
+var FACE_DET_DIM = 2048;
+var faceTarget = null, faceSig = '', faceEditGen = 0;
+// Key for the denoise signature: denoise input changes whenever the bake does.
+function faceDnKey() { return faceActiveTex ? faceSig : 'off'; }
+
+// Landmark indices (MediaPipe 478-point face mesh; eyes A/B = image left/right
+// for an unmirrored photo - naming is positional, matching is positional too).
+var FACE_LM = {
+  mouthL: 61, mouthR: 291, lowerLip: 17,
+  eyes: [
+    { outer: 33,  inner: 133, top: 159, bot: 145, iris: 468 },
+    { outer: 263, inner: 362, top: 386, bot: 374, iris: 473 }
+  ]
+};
+
+function faceP(lm, i, W, H) { return { x: lm[i].x * W, y: lm[i].y * H }; }
+function faceDist(a, b) { var dx = a.x - b.x, dy = a.y - b.y; return Math.sqrt(dx * dx + dy * dy); }
+function faceNorm(a) { var l = Math.sqrt(a.x * a.x + a.y * a.y) || 1; return { x: a.x / l, y: a.y / l }; }
+
+function loadFaceEngine() {
+  if (faceLandmarker) return Promise.resolve(faceLandmarker);
+  if (faceLoadPromise) return faceLoadPromise;
+  if (location.protocol === 'file:') {
+    return Promise.reject(new Error('file://'));
+  }
+  faceLoadPromise = import('./face/vision_bundle.mjs').then(function (vision) {
+    var FL = vision.FaceLandmarker;
+    faceConn = {
+      tess: FL.FACE_LANDMARKS_TESSELATION || null,
+      eyes: [FL.FACE_LANDMARKS_RIGHT_EYE || null, FL.FACE_LANDMARKS_LEFT_EYE || null],
+      lips: FL.FACE_LANDMARKS_LIPS || null
+    };
+    // map connection sets to the positional eye specs (eyes[0] = image left,
+    // which contains landmark 33) instead of trusting the L/R naming
+    if (faceConn.eyes[0] && !faceConn.eyes[0].some(function (e) { return e.start === 33 || e.end === 33; })) {
+      faceConn.eyes.reverse();
+    }
+    return vision.FilesetResolver.forVisionTasks('face/wasm').then(function (files) {
+      return vision.FaceLandmarker.createFromOptions(files, {
+        baseOptions: { modelAssetPath: 'face/face_landmarker.task' },
+        runningMode: 'IMAGE',
+        numFaces: 8,
+        // Default 0.5 (and even 0.2) misses small faces in group shots (a
+        // toddler in a 4-person family photo needed 0.15). The junk this low
+        // bar lets through is removed after detect: nose-distance dedup for
+        // duplicates + a minimum inter-ocular size filter.
+        minFaceDetectionConfidence: 0.15,
+        minFacePresenceConfidence: 0.15,
+        outputFaceBlendshapes: true
+      });
+    });
+  }).then(
+    function (fl) { faceLandmarker = fl; return fl; },
+    function (e) { faceLoadPromise = null; throw e; }
+  );
+  return faceLoadPromise;
+}
+
+/* sRGB blit of the ungraded base at detection size. Same render path as the
+ * export scene pass (effects=false), read back top-row-first. baked = true
+ * keeps the face bake (eye patches + smile warp) in - used to re-analyze the
+ * edited result instead of the original. */
+function faceRenderBase(maxDim, baked) {
+  var w = state.texW, h = state.texH;
+  var sc = Math.min(1, maxDim / Math.max(w, h));
+  var dw = Math.max(1, Math.round(w * sc)), dh = Math.max(1, Math.round(h * sc));
+  var tex = gl.createTexture();
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D, tex);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, dw, dh, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+  var fbo = gl.createFramebuffer();
+  gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+  if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) {
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.deleteFramebuffer(fbo); gl.deleteTexture(tex);
+    throw new Error('detection framebuffer failed');
+  }
+  gl.disable(gl.BLEND);
+  gl.disable(gl.SCISSOR_TEST);
+  gl.viewport(0, 0, dw, dh);
+  gl.clearColor(0, 0, 0, 1);
+  gl.clear(gl.COLOR_BUFFER_BIT);
+  var fWas = faceActiveTex, dWas = dnActiveTex;
+  if (!baked) faceActiveTex = null;   // default: detect on the original base
+  dnActiveTex = null;
+  drawQuad(dw, dh, 0, -1, true, 1, [0, 0], FULL_CROP, false);
+  faceActiveTex = fWas; dnActiveTex = dWas;
+  var px = new Uint8Array(dw * dh * 4);
+  gl.readPixels(0, 0, dw, dh, gl.RGBA, gl.UNSIGNED_BYTE, px);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  gl.deleteFramebuffer(fbo);
+  gl.deleteTexture(tex);
+  return { data: new Uint8ClampedArray(px.buffer), w: dw, h: dh };
+}
+
+/* Eye Aspect Ratio (vertical lid gap / eye width) per eye + smile from the
+ * mouthSmile blendshapes. EAR sidesteps the blendshape left/right-mirroring
+ * ambiguity - it is computed straight from the geometry of each image eye. */
+function faceAnalyze(lm, blendCats, W, H) {
+  var eyes = FACE_LM.eyes.map(function (spec) {
+    var o = faceP(lm, spec.outer, W, H), n = faceP(lm, spec.inner, W, H);
+    var t = faceP(lm, spec.top, W, H), b = faceP(lm, spec.bot, W, H);
+    var ew = faceDist(o, n);
+    var ear = ew > 0 ? faceDist(t, b) / ew : 0;
+    // open >= 0.19, closed <= 0.145, in between = unclear (null)
+    return { ear: ear, open: ear >= 0.19 ? true : (ear <= 0.145 ? false : null) };
+  });
+  var bs = {};
+  (blendCats || []).forEach(function (c) { bs[c.categoryName] = c.score; });
+  var smile = ((bs.mouthSmileLeft || 0) + (bs.mouthSmileRight || 0)) / 2;
+  return { eyes: eyes, smilePct: Math.round(smile * 100) };
+}
+
+/* Eye state as colored HTML with a number, so morph edits are measurable:
+ * openness % maps the eye aspect ratio from fully closed (0.145) to a
+ * wide-open eye (0.30, measured across test faces), clamped, both eyes
+ * averaged. It is a relative gauge - lid geometry differs per person. */
+function faceOpenPct(eye) {
+  return Math.max(0, Math.min(100, Math.round((eye.ear - 0.145) / (0.30 - 0.145) * 100)));
+}
+
+function faceEyesLabel(eyes) {
+  var a = eyes[0].open, b = eyes[1].open;
+  var pct = Math.round((faceOpenPct(eyes[0]) + faceOpenPct(eyes[1])) / 2);
+  var num = ' (' + pct + '%)';
+  if (a === true && b === true) return '<span class="face-open">eyes open' + num + '</span>';
+  if (a === false && b === false) return '<span class="face-closed">eyes closed' + num + '</span>';
+  if (a === false || b === false) return '<span class="face-closed">one eye closed' + num + '</span>';
+  return '<span class="face-warn">eyes unclear' + num + '</span>';
+}
+
+// Debug line for the Advanced section: input size, per-pass raw counts,
+// what the filters removed, per-face landmark quality numbers.
+function faceRenderDebug() {
+  var adv = document.getElementById('faceAdvanced');
+  var dbg = document.getElementById('faceDebug');
+  var d = faceState.debug;
+  var faces = (faceState.detGen === state.texGen) ? faceState.faces : null;
+  // Advanced stays available as soon as a photo is loaded - the extra
+  // MediaPipe tasks (pose/objects/segments) do not need a detected face.
+  adv.hidden = !state.tex;
+  dbg.hidden = !(faces && d);
+  if (dbg.hidden) return;
+  var lines = ['Input ' + d.detW + ' x ' + d.detH + ' px - raw detections: full-frame ' +
+    d.passes[0] + (d.deep ? ', tiles ' + d.passes.slice(1).join('/') : ' (no deep scan)') +
+    ' - removed ' + d.dupes + ' duplicate' + (d.dupes === 1 ? '' : 's') +
+    ', ' + d.tiny + ' tiny - kept ' + faces.length + '.'];
+  faces.forEach(function (f, i) {
+    lines.push('Face ' + (i + 1) + ': inter-ocular ' +
+      Math.round(faceIo(f, faceState.baseDet)) + ' px, smile ' + f.smilePct +
+      '%, EAR ' + f.eyes[0].ear.toFixed(2) + ' / ' + f.eyes[1].ear.toFixed(2));
+  });
+  dbg.textContent = lines.join('\n');
+  dbg.style.whiteSpace = 'pre-line';
+}
+
+/* keepSliders: skip the slider rebuild. The live re-analysis runs WHILE a
+ * slider is being dragged - replacing the DOM node under the pointer would
+ * cancel the drag (the input would only respond to single clicks). */
+function faceRenderStatus(keepSliders) {
+  var el = document.getElementById('faceStatus');
+  var controls = document.getElementById('faceControls');
+  var faces = (faceState.detGen === state.texGen) ? faceState.faces : null;
+  faceRenderDebug();
+  if (!faces) {
+    el.hidden = true; controls.hidden = true;
+    faceSyncMask();
+    return;
+  }
+  if (!faces.length) {
+    el.textContent = 'No faces detected.';
+    el.hidden = false; controls.hidden = true;
+    faceSyncMask();
+    return;
+  }
+  var smiling = 0, closed = [];
+  var lines = faces.map(function (f, i) {
+    if (f.smilePct >= 30) smiling++;
+    if (f.eyes[0].open === false || f.eyes[1].open === false) closed.push(i + 1);
+    var sm = f.smilePct >= 30
+      ? '<span class="face-open">smiling (' + f.smilePct + '%)</span>'
+      : f.smilePct >= 15
+        ? '<span class="face-warn">slight smile (' + f.smilePct + '%)</span>'
+        : '<span class="face-warn">not smiling (' + f.smilePct + '%)</span>';
+    return 'Face ' + (i + 1) + ': ' + sm + ' - ' + faceEyesLabel(f.eyes);
+  });
+  var summary = (smiling === faces.length
+      ? (faces.length === 1 ? 'Smiling' : 'All ' + faces.length + ' smiling')
+      : smiling + ' of ' + faces.length + ' smiling')
+    + ' - ' + (closed.length
+      ? '<span class="face-closed">closed eyes: face ' + closed.join(', ') + '</span>'
+      : '<span class="face-open">all eyes open</span>') + '.';
+  el.innerHTML = '<b>' + summary + '</b><br>' + lines.join('<br>');
+  el.hidden = false;
+  controls.hidden = false;
+  if (!keepSliders) faceBuildSmileSliders();
+  faceSyncMask();
+}
+
+/* Re-analyze smile % and eye state from the CURRENT baked result (eye patches
+ * + smile warp applied) after an edit - display only: landmarks and slider
+ * values stay untouched, so the warp never feeds back into itself. */
+var faceRefreshBusy = false, faceRefreshQueued = false;
+async function faceRefreshAnalysis() {
+  // While dragging, coalesce: run one pass at a time and remember that another
+  // was asked for, so the numbers keep up without queueing a detect per pixel.
+  if (faceRefreshBusy) { faceRefreshQueued = true; return; }
+  if (!faceLandmarker || !gl) return;
+  var faces = (faceState.detGen === state.texGen) ? faceState.faces : null;
+  if (!faces || !faces.length) return;
+  faceRefreshBusy = true;
+  faceRefreshQueued = false;
+  try {
+    await nextFrame();
+    computeFace();
+    var det = faceRenderBase(FACE_DET_DIM, true);
+    var res = faceLandmarker.detect(new ImageData(det.data, det.w, det.h));
+    var found = (res.faceLandmarks || []).map(function (lm, i) {
+      return { lm: lm, bs: res.faceBlendshapes && res.faceBlendshapes[i]
+        ? res.faceBlendshapes[i].categories : null };
+    });
+    faces.forEach(function (f) {
+      var io = faceIo(f, det), best = null, bd = 1e9;
+      found.forEach(function (g) {
+        var d = Math.hypot((g.lm[1].x - f.lm[1].x) * det.w, (g.lm[1].y - f.lm[1].y) * det.h);
+        if (d < bd) { bd = d; best = g; }
+      });
+      if (best && bd < 0.8 * io) {
+        var a = faceAnalyze(best.lm, best.bs, det.w, det.h);
+        f.smilePct = a.smilePct;
+        f.eyes = a.eyes;
+      }
+    });
+    faceRenderStatus(true);   // stats only - never rebuild the slider being dragged
+  } catch (e) {
+  } finally {
+    faceRefreshBusy = false;
+  }
+  if (faceRefreshQueued) faceRefreshAnalysis();
+}
+
+/* One Smile slider per detected face (numbers match the status list and the
+ * mask labels on the photo). */
+function faceBuildSmileSliders() {
+  var list = document.getElementById('faceSmileList');
+  list.innerHTML = '';
+  var faces = (faceState.detGen === state.texGen) ? faceState.faces : null;
+  if (!faces) return;
+  function mkRow(parent, label, min, max, start, fmt, initial, set) {
+    var row = document.createElement('div');
+    row.className = 'slider-row';
+    var head = document.createElement('div');
+    head.className = 'slider-head';
+    var lbl = document.createElement('span');
+    lbl.textContent = label;
+    var val = document.createElement('span');
+    val.className = 'val';
+    var inp = document.createElement('input');
+    inp.type = 'range';
+    inp.min = min; inp.max = max; inp.step = 1;
+    function apply(v) {
+      inp.value = v;
+      val.textContent = fmt(v);
+      set(v);
+      faceEditGen++;
+      requestRender();
+    }
+    inp.value = initial;
+    val.textContent = fmt(initial);
+    inp.addEventListener('input', function () {
+      apply(parseInt(inp.value, 10) || 0);
+      faceRefreshAnalysis();     // live stats while dragging (self-coalescing)
+    });
+    inp.addEventListener('change', function () { faceRefreshAnalysis(); });
+    inp.addEventListener('dblclick', function () { apply(start); });
+    addDoubleTapReset(inp, function () { apply(start); });
+    head.appendChild(lbl);
+    head.appendChild(val);
+    row.appendChild(head);
+    row.appendChild(inp);
+    parent.appendChild(row);
+  }
+  faces.forEach(function (f, i) {
+    var sel = (i === faceState.selected);
+    if (faces.length > 1) {
+      var fl = document.createElement('div');
+      fl.className = 'face-flabel' + (sel ? ' sel' : '');
+      fl.textContent = 'Face ' + (i + 1);
+      // clicking the label selects the face too (mirrors clicking the photo)
+      fl.addEventListener('click', function () {
+        faceState.selected = sel ? -1 : i;
+        faceBuildSmileSliders();
+        requestRender();
+      });
+      list.appendChild(fl);
+    }
+    var grid = document.createElement('div');
+    grid.className = 'face-srow' + (sel ? ' sel' : '');
+    mkRow(grid, 'Smile', 0, 150, 0, String,
+      Math.round((f.smile || 0) * 100),
+      function (v) { f.smile = v / 100; });
+    mkRow(grid, 'Mouth width', 70, 130, 100, function (v) { return v + ' %'; },
+      Math.round((f.width || 1) * 100),
+      function (v) { f.width = v / 100; });
+    list.appendChild(grid);
+  });
+}
+
+// One detect() pass over a region of the detection buffer, landmarks mapped
+// back to full-image normalized coords. scale > 1 upsizes the crop first so
+// small faces grow past the detector's minimum relative size.
+function faceDetectRegion(src, det, ox, oy, cw, ch, scale) {
+  var img;
+  if (ox === 0 && oy === 0 && cw === det.w && ch === det.h && scale === 1) {
+    img = new ImageData(det.data, det.w, det.h);
+  } else {
+    var cvs = document.createElement('canvas');
+    cvs.width = Math.round(cw * scale);
+    cvs.height = Math.round(ch * scale);
+    var ctx = cvs.getContext('2d');
+    ctx.drawImage(src, ox, oy, cw, ch, 0, 0, cvs.width, cvs.height);
+    img = ctx.getImageData(0, 0, cvs.width, cvs.height);
+  }
+  var res = faceLandmarker.detect(img);
+  return (res.faceLandmarks || []).map(function (lm, i) {
+    var mapped = lm.map(function (p) {
+      return { x: (ox + p.x * cw) / det.w, y: (oy + p.y * ch) / det.h, z: p.z };
+    });
+    return {
+      lm: mapped,
+      bs: res.faceBlendshapes && res.faceBlendshapes[i] ? res.faceBlendshapes[i].categories : null
+    };
+  });
+}
+
+function faceIo(f, det) {   // inter-ocular distance in detection px
+  return Math.hypot((f.lm[473].x - f.lm[468].x) * det.w,
+                    (f.lm[473].y - f.lm[468].y) * det.h);
+}
+
+/* Shared post-detection cleanup (base photo AND donor photo - both need it,
+ * the low 0.15 confidence produces duplicates in either):
+ * - size floor: inter-ocular under 6 px has no usable landmarks;
+ * - dedup: two faces whose nose tips sit closer than ~60% of the inter-ocular
+ *   distance are one face (overlapping copies from numFaces > 1 and from tile
+ *   overlap); earlier entries win, so full-frame detections beat tile copies;
+ * - sort left-to-right by nose tip (status numbering + donor matching). */
+function faceFilterSort(faces, det) {
+  var nRaw = faces.length;
+  faces = faces.filter(function (f) { return faceIo(f, det) >= 6; });
+  var tiny = nRaw - faces.length;
+  faces = faces.filter(function (f, i) {
+    for (var j = 0; j < i; j++) {
+      var g = faces[j];
+      var size = Math.max(faceIo(f, det), faceIo(g, det));
+      var d = Math.hypot((f.lm[1].x - g.lm[1].x) * det.w, (f.lm[1].y - g.lm[1].y) * det.h);
+      if (d < 0.6 * size) return false;
+    }
+    return true;
+  });
+  var dupes = nRaw - tiny - faces.length;
+  faces.sort(function (a, b) { return a.lm[1].x - b.lm[1].x; });
+  return { faces: faces, tiny: tiny, dupes: dupes };
+}
+
+async function faceDetectRun(deep) {
+  if (!state.tex || !gl) return;
+  if (!dnFloatOK) { toast('Smile Detect needs float render targets (EXT_color_buffer_float) - not available here.'); return; }
+  var btn = document.getElementById('btnFaceDetect');
+  var btnDeep = document.getElementById('btnFaceDeep');
+  btn.disabled = true;
+  btnDeep.disabled = true;
+  try {
+    if (!faceLandmarker) {
+      btn.textContent = 'Loading engine...';
+      await loadFaceEngine();
+    }
+    btn.textContent = 'Detecting...';
+    await nextFrame();
+    var det = faceRenderBase(FACE_DET_DIM);
+    var raw = faceDetectRegion(null, det, 0, 0, det.w, det.h, 1);
+    var passes = [raw.length];
+    if (deep) {
+      // 4 overlapping tiles (60% of each side) at 2x: the BlazeFace stage
+      // inside FaceLandmarker only proposes faces above a minimum relative
+      // size, so group shots need the zoom, not a lower threshold (verified:
+      // conf 0.01 found no extra faces, tiling found all of them).
+      var src = document.createElement('canvas');
+      src.width = det.w; src.height = det.h;
+      src.getContext('2d').putImageData(new ImageData(det.data, det.w, det.h), 0, 0);
+      var tiles = [[0, 0], [0.4, 0], [0, 0.4], [0.4, 0.4]];
+      for (var ti = 0; ti < tiles.length; ti++) {
+        var ox = Math.round(det.w * tiles[ti][0]), oy = Math.round(det.h * tiles[ti][1]);
+        var cw = Math.round(det.w * 0.6), ch = Math.round(det.h * 0.6);
+        var part = faceDetectRegion(src, det, ox, oy, cw, ch, 2);
+        passes.push(part.length);
+        raw = raw.concat(part);
+        await nextFrame();   // keep the tab responsive between tiles
+      }
+    }
+    var faces = raw.map(function (r) {
+      var a = faceAnalyze(r.lm, r.bs, det.w, det.h);
+      return { lm: r.lm, smilePct: a.smilePct, eyes: a.eyes, smile: 0, width: 1 };
+    });
+    var clean = faceFilterSort(faces, det);
+    faceState.faces = clean.faces;
+    faceState.detGen = state.texGen;
+    faceState.baseDet = det;
+    faceState.debug = { deep: !!deep, detW: det.w, detH: det.h, passes: passes,
+                       tiny: clean.tiny, dupes: clean.dupes };
+    faceComputePatches();
+    faceRenderStatus();
+    faceEditGen++;
+    requestRender();
+  } catch (e) {
+    if (location.protocol === 'file:') {
+      toast('Smile Detect needs a server - run serve.cmd or use the live site (file:// cannot load the WASM engine).');
+    } else {
+      toast('Face detection failed: ' + excerpt(e && e.message ? e.message : String(e)));
+    }
+  } finally {
+    btn.textContent = 'Detect faces';
+    btn.disabled = !state.tex;
+    btnDeep.disabled = !state.tex;
+  }
+}
+
+/* Match base faces to donor faces left-to-right; every closed base eye whose
+ * matched donor eye is open becomes a patch. Geometry is resolved at bake
+ * time from normalized landmarks, so patches survive resolution switches. */
+function faceComputePatches() {
+  faceState.patches = null;
+  var d = faceState.donor;
+  var faces = (faceState.detGen === state.texGen) ? faceState.faces : null;
+  if (d && d.faces && d.faces.length && faces && faces.length) {
+    var patches = [];
+    var n = Math.min(faces.length, d.faces.length);
+    for (var i = 0; i < n; i++) {
+      for (var e = 0; e < 2; e++) {
+        if (faces[i].eyes[e].open !== false) continue;    // only closed eyes
+        if (d.faces[i].eyes[e].open !== true) continue;   // donor eye must be open
+        if (patches.length >= FACE_MAX_EYES) break;
+        patches.push({ bLm: faces[i].lm, dLm: d.faces[i].lm, eye: FACE_LM.eyes[e], fi: i });
+      }
+    }
+    faceState.patches = patches;
+  }
+  faceSyncDonorUI();
+}
+
+// Mean luma of a box around a normalized point in a detection buffer, linearized.
+function faceRegionLuma(det, cx, cy, halfPx) {
+  var x0 = Math.max(0, Math.round(cx * det.w - halfPx)), x1 = Math.min(det.w - 1, Math.round(cx * det.w + halfPx));
+  var y0 = Math.max(0, Math.round(cy * det.h - halfPx)), y1 = Math.min(det.h - 1, Math.round(cy * det.h + halfPx));
+  var sum = 0, cnt = 0;
+  for (var y = y0; y <= y1; y += 2) {
+    for (var x = x0; x <= x1; x += 2) {
+      var o = (y * det.w + x) * 4;
+      sum += 0.2126 * det.data[o] + 0.7152 * det.data[o + 1] + 0.0722 * det.data[o + 2];
+      cnt++;
+    }
+  }
+  var mean = cnt ? sum / cnt / 255 : 0.5;
+  return Math.pow(Math.max(mean, 0.004), 2.2);   // approx sRGB -> linear
+}
+
+function faceSyncDonorUI() {
+  var info = document.getElementById('faceDonorInfo');
+  var row = document.getElementById('faceEyeRow');
+  var d = faceState.donor;
+  if (!d) { info.hidden = true; row.hidden = true; return; }
+  var k = faceState.patches ? faceState.patches.length : 0;
+  var who = [];
+  (faceState.patches || []).forEach(function (p) {
+    if (who.indexOf(p.fi + 1) < 0) who.push(p.fi + 1);
+  });
+  info.textContent = 'Eyes photo: ' + d.faces.length + ' face' + (d.faces.length === 1 ? '' : 's') +
+    ' (matched to this photo left-to-right) - ' +
+    (k ? 'replacing ' + k + ' closed eye' + (k === 1 ? '' : 's') +
+         ' on face ' + who.join(', ') + '.'
+       : 'no closed eye here has an open donor eye - nothing to replace.');
+  info.hidden = false;
+  row.hidden = !k;
+  document.getElementById('faceEyeAdj').hidden = !k;
+}
+
+async function faceLoadDonor(file) {
+  if (!gl) return;
+  try {
+    if (!faceLandmarker) await loadFaceEngine();
+    var bmp = await createImageBitmap(file);
+    var maxTex = gl.getParameter(gl.MAX_TEXTURE_SIZE);
+    var cap = Math.min(maxTex, 3000);
+    var sc = Math.min(1, cap / Math.max(bmp.width, bmp.height));
+    var dw = Math.max(1, Math.round(bmp.width * sc)), dh = Math.max(1, Math.round(bmp.height * sc));
+    var c = document.createElement('canvas');
+    c.width = dw; c.height = dh;
+    var cx = c.getContext('2d');
+    cx.drawImage(bmp, 0, 0, dw, dh);
+    bmp.close();
+    // Detect on a FACE_DET_DIM copy (landmarks are normalized, so they map
+    // onto the full-size donor texture); the texture itself keeps up to 3000px.
+    var dc = c;
+    if (Math.max(dw, dh) > FACE_DET_DIM) {
+      var dsc = FACE_DET_DIM / Math.max(dw, dh);
+      dc = document.createElement('canvas');
+      dc.width = Math.max(1, Math.round(dw * dsc));
+      dc.height = Math.max(1, Math.round(dh * dsc));
+      dc.getContext('2d').drawImage(c, 0, 0, dc.width, dc.height);
+    }
+    var res = faceLandmarker.detect(dc);
+    var srcpx = cx.getImageData(0, 0, dw, dh);
+    var faces = (res.faceLandmarks || []).map(function (lm, i) {
+      var a = faceAnalyze(lm, res.faceBlendshapes && res.faceBlendshapes[i]
+        ? res.faceBlendshapes[i].categories : null, dw, dh);
+      return { lm: lm, smilePct: a.smilePct, eyes: a.eyes };
+    });
+    faces = faceFilterSort(faces, { w: dw, h: dh }).faces;
+    if (!faces.length) { toast('No face found in the eyes photo.'); return; }
+    // Upload linear float so the patch composites correctly in linear light.
+    var data = new Float32Array(dw * dh * 4);
+    for (var i = 0, o = 0; i < srcpx.data.length; i += 4) {
+      data[o++] = SRGB_TO_LIN[srcpx.data[i]];
+      data[o++] = SRGB_TO_LIN[srcpx.data[i + 1]];
+      data[o++] = SRGB_TO_LIN[srcpx.data[i + 2]];
+      data[o++] = 1;
+    }
+    if (faceState.donor) gl.deleteTexture(faceState.donor.tex);
+    var tex = gl.createTexture();
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA16F, dw, dh, 0, gl.RGBA, gl.FLOAT, data);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    faceState.donor = { tex: tex, w: dw, h: dh, det: { data: srcpx.data, w: dw, h: dh }, faces: faces };
+    faceComputePatches();
+    faceEditGen++;
+    requestRender();
+  } catch (e) {
+    toast('Could not load eyes photo: ' + excerpt(e && e.message ? e.message : String(e)));
+  }
+}
+
+/* ---- Smile morph: piecewise-affine warp over a Delaunay mesh --------------
+ * Control points = outer + inner lip rings (moved) and cheeks (partial
+ * follow) inside a pinned anchor ring (subnasale/nostrils, chin, jaw, nose,
+ * cheekbones). The source points are Delaunay-triangulated and each triangle
+ * is drawn as a textured GPU triangle at its displaced corners - a piecewise-
+ * affine warp (classic face-morph technique). Unlike the earlier MLS field,
+ * whose weights decay but never reach zero (so the whole face crept along),
+ * displacement here is exactly zero outside the anchor ring: a triangle's
+ * affine map depends only on its own three corners, and all-anchor triangles
+ * are identity (they are not even drawn).
+ * Smile targets follow zygomaticus-major kinematics (motion-capture lit.):
+ * corners travel supero-laterally at ~40 deg above the mouth axis, the mouth
+ * widens, the upper lip elevates slightly without thinning, cheeks follow at
+ * about a third of the corner excursion. */
+var FACE_LIP_RING = [61, 185, 40, 39, 37, 0, 267, 269, 270, 409, 291,
+                     375, 321, 405, 314, 17, 84, 181, 91, 146];
+var FACE_LIP_INNER = [78, 191, 80, 81, 82, 13, 312, 311, 310, 415, 308,
+                      324, 318, 402, 317, 14, 87, 178, 88, 95];
+var FACE_CHEEK_PTS = [205, 425];
+// Pinned ring: subnasale + nostril corners, chin, lower jaw, nose bridge/tip,
+// jaw sides, cheekbones. Everything at or beyond this ring stays put.
+var FACE_ANCHOR_PTS = [2, 98, 327, 200, 136, 365, 6, 195, 1, 152, 58, 288, 117, 346];
+
+/* Bowyer-Watson Delaunay triangulation; returns flat [a,b,c, ...] indices. */
+function faceDelaunay(pts) {
+  var n = pts.length, i;
+  var minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (i = 0; i < n; i++) {
+    var p = pts[i];
+    if (p.x < minX) minX = p.x;
+    if (p.x > maxX) maxX = p.x;
+    if (p.y < minY) minY = p.y;
+    if (p.y > maxY) maxY = p.y;
+  }
+  var span = Math.max(maxX - minX, maxY - minY, 1);
+  var midX = (minX + maxX) / 2, midY = (minY + maxY) / 2;
+  var v = pts.slice();
+  v.push({ x: midX - 20 * span, y: midY - span });
+  v.push({ x: midX, y: midY + 20 * span });
+  v.push({ x: midX + 20 * span, y: midY - span });
+  function tri(a, b, c) {
+    var A = v[a], B = v[b], C = v[c];
+    var d = 2 * (A.x * (B.y - C.y) + B.x * (C.y - A.y) + C.x * (A.y - B.y));
+    var t = { a: a, b: b, c: c, x: 0, y: 0, r2: Infinity };
+    if (Math.abs(d) > 1e-12) {
+      var a2 = A.x * A.x + A.y * A.y, b2 = B.x * B.x + B.y * B.y, c2 = C.x * C.x + C.y * C.y;
+      t.x = (a2 * (B.y - C.y) + b2 * (C.y - A.y) + c2 * (A.y - B.y)) / d;
+      t.y = (a2 * (C.x - B.x) + b2 * (A.x - C.x) + c2 * (B.x - A.x)) / d;
+      t.r2 = (A.x - t.x) * (A.x - t.x) + (A.y - t.y) * (A.y - t.y);
+    }
+    return t;
+  }
+  var tris = [tri(n, n + 1, n + 2)];
+  for (i = 0; i < n; i++) {
+    var px = v[i].x, py = v[i].y;
+    var bad = [], keep = [], k;
+    for (k = 0; k < tris.length; k++) {
+      var t = tris[k];
+      var dx = px - t.x, dy = py - t.y;
+      (dx * dx + dy * dy < t.r2 ? bad : keep).push(t);
+    }
+    // boundary of the bad-triangle cavity = edges not shared by two bad tris
+    var edges = [];
+    bad.forEach(function (t) {
+      [[t.a, t.b], [t.b, t.c], [t.c, t.a]].forEach(function (e) {
+        for (var m = 0; m < edges.length; m++) {
+          if ((edges[m][0] === e[0] && edges[m][1] === e[1]) ||
+              (edges[m][0] === e[1] && edges[m][1] === e[0])) {
+            edges.splice(m, 1);
+            return;
+          }
+        }
+        edges.push(e);
+      });
+    });
+    tris = keep;
+    edges.forEach(function (e) { tris.push(tri(e[0], e[1], i)); });
+  }
+  var out = [];
+  tris.forEach(function (t) {
+    if (t.a < n && t.b < n && t.c < n) out.push(t.a, t.b, t.c);
+  });
+  return out;
+}
+
+// Source points + smile displacements for one face at the current resolution.
+function faceSmileControls(f, W, H) {
+  var lm = f.lm, s = f.smile || 0;
+  var L = faceP(lm, FACE_LM.mouthL, W, H), R = faceP(lm, FACE_LM.mouthR, W, H);
+  var mw = faceDist(L, R);
+  if (mw < 4) return null;
+  var mc = { x: (L.x + R.x) / 2, y: (L.y + R.y) / 2 };
+  var eA = faceP(lm, FACE_LM.eyes[0].iris, W, H), eB = faceP(lm, FACE_LM.eyes[1].iris, W, H);
+  var up = faceNorm({ x: (eA.x + eB.x) / 2 - mc.x, y: (eA.y + eB.y) / 2 - mc.y });
+  var ax = faceNorm({ x: R.x - L.x, y: R.y - L.y });
+  var P = [], D = [], ids = [];   // ids: landmark index per movable point (-1 = anchor)
+  var wfac = (f.width || 1) - 1;   // independent mouth-width morph (1 = neutral)
+  function lipTarget(idx) {
+    var p = faceP(lm, idx, W, H);
+    var rx = p.x - mc.x, ry = p.y - mc.y;
+    var axial = rx * ax.x + ry * ax.y;   // px along the mouth axis
+    // t = signed position along the mouth axis (-1 left corner .. +1 right)
+    var t = Math.max(-1, Math.min(1, axial / (mw / 2)));
+    var upper = (rx * up.x + ry * up.y) > 0;
+    // Corner excursion at slider 1.0: 0.15 mw lateral + 0.13 mw up, i.e. the
+    // ~40 deg supero-lateral zygomaticus pull; |t|^1.7 concentrates it at the
+    // corners (that curvature is what reads as a smile). The upper lip also
+    // elevates a touch toward the nasolabial fold, strongest at the philtrum.
+    // The Mouth width slider scales the lips along their axis on top of that.
+    var wide = 0.15 * t;
+    var rise = 0.13 * Math.pow(Math.abs(t), 1.7)
+             + (upper ? 0.030 : 0.012) * (1 - Math.abs(t));
+    P.push(p);
+    ids.push(idx);
+    D.push({ x: s * mw * (ax.x * wide + up.x * rise) + ax.x * wfac * axial,
+             y: s * mw * (ax.y * wide + up.y * rise) + ax.y * wfac * axial });
+  }
+  FACE_LIP_RING.forEach(lipTarget);
+  FACE_LIP_INNER.forEach(lipTarget);
+  FACE_CHEEK_PTS.forEach(function (idx) {
+    var p = faceP(lm, idx, W, H);
+    // cheeks follow the near corner at ~1/3 of its excursion
+    var sgn = ((p.x - mc.x) * ax.x + (p.y - mc.y) * ax.y) >= 0 ? 1 : -1;
+    P.push(p);
+    ids.push(idx);
+    D.push({ x: s * mw * 0.35 * (ax.x * 0.15 * sgn + up.x * 0.13),
+             y: s * mw * 0.35 * (ax.y * 0.15 * sgn + up.y * 0.13) });
+  });
+  FACE_ANCHOR_PTS.forEach(function (idx) {
+    P.push(faceP(lm, idx, W, H));
+    ids.push(-1);
+    D.push({ x: 0, y: 0 });
+  });
+  return { P: P, D: D, ids: ids, mc: mc, mw: mw };
+}
+
+/* Interleaved [x, y, u, v] control-point vertices at displaced positions +
+ * the Delaunay index list, pruned to triangles that actually move. */
+function faceBuildWarpMesh(f, W, H) {
+  var c = faceSmileControls(f, W, H);
+  if (!c) return null;
+  var n = c.P.length;
+  var verts = new Float32Array(n * 4);
+  var moved = new Uint8Array(n);
+  for (var i = 0; i < n; i++) {
+    verts[i * 4] = c.P[i].x + c.D[i].x;
+    verts[i * 4 + 1] = c.P[i].y + c.D[i].y;
+    verts[i * 4 + 2] = c.P[i].x / W;
+    verts[i * 4 + 3] = c.P[i].y / H;
+    moved[i] = (Math.abs(c.D[i].x) + Math.abs(c.D[i].y)) > 1e-3 ? 1 : 0;
+  }
+  var tris = faceDelaunay(c.P);
+  var idx = [];
+  for (var k = 0; k < tris.length; k += 3) {
+    if (moved[tris[k]] || moved[tris[k + 1]] || moved[tris[k + 2]]) {
+      idx.push(tris[k], tris[k + 1], tris[k + 2]);
+    }
+  }
+  if (!idx.length) return null;
+  return { verts: verts, idx: new Uint16Array(idx) };
+}
+
+/* Per-patch uniforms at the current texture resolution: feathered ellipse over
+ * the base eye + similarity transform (complex form) base px -> donor px, with
+ * a CPU-matched luma gain so the donor skin tone sits at the base exposure. */
+function faceEyeUniforms() {
+  var T = new Float32Array(FACE_MAX_EYES * 4), B = new Float32Array(FACE_MAX_EYES * 2);
+  var E = new Float32Array(FACE_MAX_EYES * 4), X = new Float32Array(FACE_MAX_EYES * 2);
+  var patches = faceState.patches, d = faceState.donor;
+  if (!patches || !patches.length || !d) return { t: T, b: B, e: E, x: X, n: 0 };
+  var W = state.texW, H = state.texH, n = 0;
+  patches.forEach(function (p) {
+    if (n >= FACE_MAX_EYES) return;
+    var spec = p.eye;
+    var o = faceP(p.bLm, spec.outer, W, H), inn = faceP(p.bLm, spec.inner, W, H);
+    var ew = faceDist(o, inn);
+    if (ew < 3) return;
+    var bo = faceP(p.dLm, spec.outer, d.w, d.h), bi = faceP(p.dLm, spec.inner, d.w, d.h);
+    var bvx = inn.x - o.x, bvy = inn.y - o.y;
+    var dvx = bi.x - bo.x, dvy = bi.y - bo.y;
+    var den = bvx * bvx + bvy * bvy;
+    if (den < 1e-6) return;
+    // t = (donor vec) / (base vec) as complex numbers
+    var tr = (dvx * bvx + dvy * bvy) / den;
+    var ti = (dvy * bvx - dvx * bvy) / den;
+    // luma gain from the sRGB detection buffers (box ~ 1.2 eye widths)
+    var bDet = faceState.baseDet;
+    var cN = { x: (p.bLm[spec.outer].x + p.bLm[spec.inner].x) / 2, y: (p.bLm[spec.outer].y + p.bLm[spec.inner].y) / 2 };
+    var dN = { x: (p.dLm[spec.outer].x + p.dLm[spec.inner].x) / 2, y: (p.dLm[spec.outer].y + p.dLm[spec.inner].y) / 2 };
+    var gain = 1;
+    if (bDet) {
+      var bl = faceRegionLuma(bDet, cN.x, cN.y, 1.2 * ew * (bDet.w / W));
+      var dl = faceRegionLuma(d.det, dN.x, dN.y, 1.2 * faceDist(bo, bi));
+      gain = Math.min(4, Math.max(0.25, bl / Math.max(dl, 1e-4)));
+    }
+    T[n * 4] = tr; T[n * 4 + 1] = ti; T[n * 4 + 2] = bo.x; T[n * 4 + 3] = bo.y;
+    B[n * 2] = o.x; B[n * 2 + 1] = o.y;
+    E[n * 4] = (o.x + inn.x) / 2; E[n * 4 + 1] = (o.y + inn.y) / 2;
+    E[n * 4 + 2] = 0.72 * ew; E[n * 4 + 3] = 0.55 * ew;
+    X[n * 2] = Math.atan2(bvy, bvx); X[n * 2 + 1] = gain;
+    n++;
+  });
+  return { t: T, b: B, e: E, x: X, n: n };
+}
+
+function faceMorphActive(f) {
+  return Math.abs(f.smile || 0) > 0.005 || Math.abs((f.width || 1) - 1) > 0.005;
+}
+
+function faceSmileFaces() {
+  if (!faceState.faces || faceState.detGen !== state.texGen) return [];
+  return faceState.faces.filter(faceMorphActive);
+}
+
+function faceEditActive() {
+  return !!(state.tex && faceProg && dnFloatOK && groupEnabled.Face &&
+    faceState.faces && faceState.faces.length && faceState.detGen === state.texGen &&
+    (faceSmileFaces().length ||
+     (faceState.patches && faceState.patches.length && faceState.eyeBlend > 0)));
+}
+
+// Two RGBA16F targets: T1 = eye-patched base, T2 = T1 + smile mesh warp.
+var faceTargetB = null;
+function ensureFaceTargets(w, h) {
+  if (faceTarget && faceTarget.w === w && faceTarget.h === h) return !!(faceTarget && faceTargetB);
+  [faceTarget, faceTargetB].forEach(function (t) {
+    if (t) { gl.deleteTexture(t.tex); gl.deleteFramebuffer(t.fb); }
+  });
+  faceTarget = makeDnTarget(w, h);
+  faceTargetB = makeDnTarget(w, h);
+  faceSig = '';
+  return !!(faceTarget && faceTargetB);
+}
+
+function computeFace() {
+  faceActiveTex = null;
+  if (!gl || !faceEditActive()) return;
+  var w = state.texW, h = state.texH;
+  if (!ensureFaceTargets(w, h)) return;
+  var smileFaces = faceSmileFaces();
+  var outTex = smileFaces.length ? faceTargetB.tex : faceTarget.tex;
+  var sig = [state.texGen, w, h, faceEditGen].join(':');
+  if (sig === faceSig) { faceActiveTex = outTex; return; }
+  var eyes = faceEyeUniforms();
+  gl.disable(gl.SCISSOR_TEST);
+  gl.disable(gl.BLEND);
+  gl.viewport(0, 0, w, h);
+  // Pass 1: eye donor patches (or plain copy) base -> T1.
+  gl.useProgram(faceProg);
+  gl.uniform2f(faceUni.size, w, h);
+  gl.uniform1i(faceUni.eyeN, eyes.n);
+  gl.uniform4fv(faceUni.eyeT, eyes.t);
+  gl.uniform2fv(faceUni.eyeB, eyes.b);
+  gl.uniform4fv(faceUni.eyeE, eyes.e);
+  gl.uniform2fv(faceUni.eyeAux, eyes.x);
+  gl.uniform1f(faceUni.eyeBlend, faceState.eyeBlend);
+  gl.uniform3f(faceUni.eyeAdj, faceState.eyeAdj.s, faceState.eyeAdj.x, faceState.eyeAdj.y);
+  var donorTex = (eyes.n && faceState.donor) ? faceState.donor.tex : faceDummyDonor;
+  gl.uniform2f(faceUni.donorSize, faceState.donor ? faceState.donor.w : 1,
+    faceState.donor ? faceState.donor.h : 1);
+  gl.activeTexture(gl.TEXTURE0 + 5);
+  gl.bindTexture(gl.TEXTURE_2D, donorTex);
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D, state.tex);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, faceTarget.fb);
+  gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+  if (smileFaces.length) {
+    // Pass 2: copy T1 -> T2 (same program, no eyes), then draw the displaced
+    // smile meshes over it, sampling T1.
+    gl.uniform1i(faceUni.eyeN, 0);
+    gl.bindTexture(gl.TEXTURE_2D, faceTarget.tex);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, faceTargetB.fb);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    gl.useProgram(faceGridProg);
+    gl.uniform2f(faceGridUni.size, w, h);
+    var prevVao = gl.getParameter(gl.VERTEX_ARRAY_BINDING);
+    gl.bindVertexArray(faceGridVao);
+    for (var fi = 0; fi < smileFaces.length; fi++) {
+      var mesh = faceBuildWarpMesh(smileFaces[fi], w, h);
+      if (!mesh) continue;
+      gl.bindBuffer(gl.ARRAY_BUFFER, faceGridVbo);
+      gl.bufferData(gl.ARRAY_BUFFER, mesh.verts, gl.DYNAMIC_DRAW);
+      gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, mesh.idx, gl.DYNAMIC_DRAW);
+      gl.drawElements(gl.TRIANGLES, mesh.idx.length, gl.UNSIGNED_SHORT, 0);
+    }
+    gl.bindVertexArray(prevVao);
+    gl.bindBuffer(gl.ARRAY_BUFFER, null);
+  }
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  gl.activeTexture(gl.TEXTURE0 + 5);
+  gl.bindTexture(gl.TEXTURE_2D, null);
+  gl.activeTexture(gl.TEXTURE0);
+  faceActiveTex = outTex;
+  faceSig = sig;
+}
+
+/* New image: detection, patches and the smile amount are per-image; the donor
+ * photo survives (typical use: several frames from the same shoot). */
+function faceNewImage() {
+  faceState.faces = null;
+  faceState.detGen = -1;
+  faceState.baseDet = null;
+  faceState.patches = null;
+  faceState.selected = -1;
+  faceState.hit = null;
+  if (typeof mpClear === 'function') mpClear();   // extra-task overlays are per-image
+  faceActiveTex = null;
+  faceSig = '';
+  faceEditGen++;
+  var list = document.getElementById('faceSmileList');
+  if (list) list.innerHTML = '';
+  faceRenderStatus();
+  faceSyncDonorUI();
+}
+
+function faceClearAll() {
+  if (faceState.donor) { gl.deleteTexture(faceState.donor.tex); faceState.donor = null; }
+  faceState.eyeBlend = 1;
+  faceState.eyeAdj = { s: 1, x: 0, y: 0 };
+  var b = document.getElementById('faceEyeBlend');
+  if (b) { b.value = 100; document.getElementById('faceEyeVal').textContent = '100 %'; }
+  [['faceEyeSize', 'faceEyeSizeVal', '100', '100 %'], ['faceEyeDirX', 'faceEyeDirXVal', '0', '0'],
+   ['faceEyeDirY', 'faceEyeDirYVal', '0', '0']].forEach(function (s) {
+    var i = document.getElementById(s[0]);
+    if (i) { i.value = s[2]; document.getElementById(s[1]).textContent = s[3]; }
+  });
+  faceNewImage();
+  requestRender();
+}
+
+/* ---- Detection mask overlay: an HTML canvas over the photo. Modes:
+ * box (one box + number per face), mesh (full landmark tessellation),
+ * eyesmouth (eye rings colored by open state + lip rings). Numbers always
+ * match the status list + sliders. ---- */
+function faceSyncMask() {
+  var cvs = document.getElementById('facemask');
+  if (!cvs) return;
+  var faces = (faceState.detGen === state.texGen) ? faceState.faces : null;
+  var showFaces = faceState.maskMode !== 'none' && faces && faces.length;
+  var showExtra = typeof mpAnyOn === 'function' && mpAnyOn();
+  cvs.hidden = !(state.tex && (showFaces || showExtra));
+  requestRender();
+}
+
+function drawFaceMask(zoom, pan, crop) {
+  var cvs = document.getElementById('facemask');
+  if (!cvs || cvs.hidden) return;
+  var faces = (faceState.detGen === state.texGen) ? faceState.faces : null;
+  var dpr = window.devicePixelRatio || 1;
+  var Wc = canvasWrap.clientWidth, Hc = canvasWrap.clientHeight;
+  if (cvs.width !== Math.round(Wc * dpr) || cvs.height !== Math.round(Hc * dpr)) {
+    cvs.width = Math.round(Wc * dpr);
+    cvs.height = Math.round(Hc * dpr);
+  }
+  var ctx = cvs.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, Wc, Hc);
+  if (!state.tex) return;
+  // Same projection as the screen render pass (drawQuad / drawOverlays).
+  crop = crop || FULL_CROP;
+  var angleRad = -state.angleDeg * Math.PI / 180;
+  var rotQ = (((Math.round(state.angleDeg / 90) % 4) + 4) % 4);
+  var tc = dispCropToTex(crop, rotQ);
+  var A = (state.texW * tc.w) / (state.texH * tc.h);
+  var ca = Math.abs(Math.cos(angleRad)), sa = Math.abs(Math.sin(angleRad));
+  var vpAspect = Wc / Hc;
+  var k = Math.min(vpAspect / (A * ca + sa), 1 / (A * sa + ca));
+  var z = zoom || 1;
+  var panX = pan ? pan[0] : 0, panY = pan ? pan[1] : 0;
+  var cR = Math.cos(angleRad), sR = Math.sin(angleRad);
+  function map(u, v) {   // normalized full-texture coords -> screen px
+    var lx = ((u - tc.x) / tc.w * 2 - 1) * A;
+    var ly = 1 - 2 * (v - tc.y) / tc.h;
+    var rx = cR * lx - sR * ly, ry = sR * lx + cR * ly;
+    return {
+      x: ((rx * (k / vpAspect) * z + panX) * 0.5 + 0.5) * Wc,
+      y: (0.5 - (ry * k * z + panY) * 0.5) * Hc
+    };
+  }
+  // Extra MediaPipe overlays sit under the face mask (segmentation is a fill).
+  if (typeof mpDrawOverlays === 'function') mpDrawOverlays(ctx, map);
+  var mode = faceState.maskMode;
+  if (!faces || !faces.length || mode === 'none') { faceState.hit = null; return; }
+  // Landmarks displaced by the current smile warp, so the mask tracks the
+  // reshaped mouth instead of hovering over the original lips.
+  function maskLm(f) {
+    if (!faceMorphActive(f)) return f.lm;
+    var W = state.texW, H = state.texH;
+    var c = faceSmileControls(f, W, H);
+    if (!c) return f.lm;
+    var out = f.lm.slice();
+    for (var i = 0; i < c.ids.length; i++) {
+      if (c.ids[i] < 0) continue;
+      var p = f.lm[c.ids[i]];
+      out[c.ids[i]] = { x: p.x + c.D[i].x / W, y: p.y + c.D[i].y / H };
+    }
+    return out;
+  }
+  function strokeConn(lm, set, color, width) {
+    if (!set) return;
+    ctx.strokeStyle = color;
+    ctx.lineWidth = width;
+    ctx.beginPath();
+    for (var i = 0; i < set.length; i++) {
+      var a = map(lm[set[i].start].x, lm[set[i].start].y);
+      var b = map(lm[set[i].end].x, lm[set[i].end].y);
+      ctx.moveTo(a.x, a.y);
+      ctx.lineTo(b.x, b.y);
+    }
+    ctx.stroke();
+  }
+  var hit = [];
+  faces.forEach(function (f, fi) {
+    var lm = maskLm(f);
+    var u0 = 1, v0 = 1, u1 = 0, v1 = 0;
+    for (var i = 0; i < lm.length; i++) {
+      if (lm[i].x < u0) u0 = lm[i].x;
+      if (lm[i].x > u1) u1 = lm[i].x;
+      if (lm[i].y < v0) v0 = lm[i].y;
+      if (lm[i].y > v1) v1 = lm[i].y;
+    }
+    // map the 4 corners so the overlay tracks display rotation
+    var c1 = map(u0, v0), c2 = map(u1, v0), c3 = map(u1, v1), c4 = map(u0, v1);
+    hit.push({
+      fi: fi,
+      x0: Math.min(c1.x, c2.x, c3.x, c4.x), x1: Math.max(c1.x, c2.x, c3.x, c4.x),
+      y0: Math.min(c1.y, c2.y, c3.y, c4.y), y1: Math.max(c1.y, c2.y, c3.y, c4.y)
+    });
+    var sel = (fi === faceState.selected);
+    var col = sel ? '#ffd24a' : '#4a90d9';
+    if (mode === 'box') {
+      ctx.strokeStyle = col;
+      ctx.lineWidth = sel ? 3 : 2;
+      ctx.beginPath();
+      ctx.moveTo(c1.x, c1.y);
+      ctx.lineTo(c2.x, c2.y);
+      ctx.lineTo(c3.x, c3.y);
+      ctx.lineTo(c4.x, c4.y);
+      ctx.closePath();
+      ctx.stroke();
+    } else if (mode === 'mesh') {
+      if (faceConn && faceConn.tess) {
+        strokeConn(lm, faceConn.tess,
+          sel ? 'rgba(255, 210, 74, 0.65)' : 'rgba(74, 144, 217, 0.5)', 1);
+      } else {
+        ctx.fillStyle = sel ? '#ffd24a' : 'rgba(74, 144, 217, 0.8)';
+        for (var d = 0; d < lm.length; d++) {
+          var q = map(lm[d].x, lm[d].y);
+          ctx.fillRect(q.x - 1, q.y - 1, 2, 2);
+        }
+      }
+    } else if (mode === 'eyesmouth') {
+      if (faceConn) {
+        faceConn.eyes.forEach(function (set, ei) {
+          var open = f.eyes[ei].open;
+          strokeConn(lm, set, open === true ? '#5fbf6f' : open === false ? '#e05252' : '#bbb',
+            sel ? 2.5 : 1.5);
+        });
+        strokeConn(lm, faceConn.lips, col, sel ? 2.5 : 1.5);
+      }
+    }
+    var tx = (c1.x + c2.x) / 2, ty = Math.min(c1.y, c2.y, c3.y, c4.y);
+    ctx.font = (sel ? '700 15px' : '600 13px') + ' system-ui, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.lineWidth = 3;
+    ctx.strokeStyle = 'rgba(0, 0, 0, 0.7)';
+    ctx.strokeText('Face ' + (fi + 1), tx, ty - 6);
+    ctx.fillStyle = sel ? '#ffd24a' : '#fff';
+    ctx.fillText('Face ' + (fi + 1), tx, ty - 6);
+  });
+  faceState.hit = hit;
+}
+
+/* Click on the photo selects the face under the pointer (smallest box wins,
+ * so a face inside another face's box is still reachable); clicking empty
+ * space clears the selection. Only active while a mask is shown. */
+function faceSelectAt(sx, sy) {
+  if (faceState.maskMode === 'none') return false;
+  var hit = faceState.hit;
+  var faces = (faceState.detGen === state.texGen) ? faceState.faces : null;
+  if (!hit || !faces || !faces.length) return false;
+  var best = -1, bestArea = Infinity;
+  hit.forEach(function (h) {
+    if (sx < h.x0 || sx > h.x1 || sy < h.y0 || sy > h.y1) return;
+    var a = (h.x1 - h.x0) * (h.y1 - h.y0);
+    if (a < bestArea) { bestArea = a; best = h.fi; }
+  });
+  if (best < 0 && faceState.selected < 0) return false;
+  faceState.selected = (best === faceState.selected) ? -1 : best;
+  faceBuildSmileSliders();
+  requestRender();
+  return best >= 0;
+}
+
+/* ---- Extra MediaPipe tasks (Advanced) -------------------------------------
+ * The vendored tasks-vision bundle ships every vision task; only the model
+ * files differ, so each of these lazy-loads its own .task/.tflite on first
+ * use and draws onto the same overlay canvas. Results are keyed to texGen
+ * like the face detection, so a new photo invalidates them. */
+/* Key order drives the button row and the info line, not the draw order -
+ * mpDrawOverlays paints the segmentation tint first on purpose so the pose,
+ * hand and object graphics stay on top of it. */
+var MP_TASKS = {
+  objects: {
+    label: 'Objects', model: 'face/efficientdet_lite0.tflite', cls: 'ObjectDetector',
+    opts: { scoreThreshold: 0.4, maxResults: 20 }
+  },
+  seg: {
+    label: 'Segments', model: 'face/selfie_multiclass_256x256.tflite', cls: 'ImageSegmenter',
+    opts: { outputCategoryMask: true, outputConfidenceMasks: false }
+  },
+  // Pose/hand thresholds are well below the 0.5 defaults on purpose: in group
+  // shots the defaults return only the largest/most frontal person (measured
+  // on a 4-person photo: 0.4 -> 3 poses, 0.2 -> all 4; hands 0.3 -> 2, 0.15 -> 3).
+  pose: {
+    label: 'Pose', model: 'face/pose_landmarker_lite.task', cls: 'PoseLandmarker',
+    opts: { numPoses: 6, minPoseDetectionConfidence: 0.2,
+            minPosePresenceConfidence: 0.2, minTrackingConfidence: 0.2 }
+  },
+  hands: {
+    label: 'Hands', model: 'face/hand_landmarker.task', cls: 'HandLandmarker',
+    opts: { numHands: 8, minHandDetectionConfidence: 0.15,
+            minHandPresenceConfidence: 0.15, minTrackingConfidence: 0.15 }
+  }
+};
+// Selfie-multiclass classes; background stays transparent.
+var MP_SEG_COLORS = [null, [255, 170, 60], [90, 190, 255], [110, 230, 150],
+                     [220, 110, 220], [180, 180, 180]];
+var MP_SEG_NAMES = ['background', 'hair', 'skin', 'face', 'clothes', 'other'];
+var mpRunners = {};          // key -> task instance (memoized)
+var mpState = { gen: -1, on: {}, res: {} };
+
+function mpLoad(key) {
+  if (mpRunners[key]) return Promise.resolve(mpRunners[key]);
+  var spec = MP_TASKS[key];
+  return import('./face/vision_bundle.mjs').then(function (vision) {
+    return vision.FilesetResolver.forVisionTasks('face/wasm').then(function (files) {
+      var opts = Object.assign({ baseOptions: { modelAssetPath: spec.model },
+        runningMode: 'IMAGE' }, spec.opts);
+      return vision[spec.cls].createFromOptions(files, opts).then(function (r) {
+        mpRunners[key] = r;
+        // connection sets live on the class, not the instance
+        if (key === 'pose') mpRunners.poseConn = vision.PoseLandmarker.POSE_CONNECTIONS;
+        if (key === 'hands') mpRunners.handConn = vision.HandLandmarker.HAND_CONNECTIONS;
+        return r;
+      });
+    });
+  });
+}
+
+function mpInfoText() {
+  var el = document.getElementById('mpInfo');
+  var parts = [];
+  Object.keys(MP_TASKS).forEach(function (k) {
+    if (!mpState.on[k]) return;
+    var r = mpState.res[k];
+    if (!r) return;
+    if (k === 'pose') parts.push(r.landmarks.length + ' pose' + (r.landmarks.length === 1 ? '' : 's'));
+    else if (k === 'hands') parts.push(r.landmarks.length + ' hand' + (r.landmarks.length === 1 ? '' : 's'));
+    else if (k === 'seg') parts.push('segments: ' + (r.present.length ? r.present.join(', ') : 'none'));
+    else if (k === 'objects') {
+      parts.push(r.items.length ? r.items.map(function (o) {
+        return o.name + ' ' + Math.round(o.score * 100) + '%';
+      }).join(', ') : 'no objects');
+    }
+  });
+  el.textContent = parts.join(' - ');
+  el.hidden = !parts.length;
+}
+
+/* Run one task on the detection-size blit of the current photo. */
+async function mpRun(key) {
+  var det = faceRenderBase(FACE_DET_DIM);
+  var img = new ImageData(det.data, det.w, det.h);
+  var runner = mpRunners[key];
+  if (key === 'pose' || key === 'hands') {
+    var res = runner.detect(img);
+    mpState.res[key] = { landmarks: res.landmarks || [] };
+  } else if (key === 'objects') {
+    var od = runner.detect(img);
+    mpState.res[key] = {
+      items: (od.detections || []).map(function (d) {
+        var b = d.boundingBox, c = d.categories && d.categories[0];
+        return {
+          x0: b.originX / det.w, y0: b.originY / det.h,
+          x1: (b.originX + b.width) / det.w, y1: (b.originY + b.height) / det.h,
+          name: c ? c.categoryName : '?', score: c ? c.score : 0
+        };
+      })
+    };
+  } else if (key === 'seg') {
+    var sr = runner.segment(img);
+    var mask = sr.categoryMask;
+    var mw = mask.width, mh = mask.height;
+    var cat = mask.getAsUint8Array();
+    var rgba = new Uint8ClampedArray(mw * mh * 4);
+    var present = [];
+    for (var i = 0; i < cat.length; i++) {
+      var col = MP_SEG_COLORS[cat[i]];
+      if (!col) continue;
+      if (present.indexOf(MP_SEG_NAMES[cat[i]]) < 0) present.push(MP_SEG_NAMES[cat[i]]);
+      rgba[i * 4] = col[0]; rgba[i * 4 + 1] = col[1];
+      rgba[i * 4 + 2] = col[2]; rgba[i * 4 + 3] = 255;
+    }
+    mask.close();
+    var cvs = document.createElement('canvas');
+    cvs.width = mw; cvs.height = mh;
+    cvs.getContext('2d').putImageData(new ImageData(rgba, mw, mh), 0, 0);
+    mpState.res.seg = { canvas: cvs, present: present };
+  }
+  mpState.gen = state.texGen;
+}
+
+async function mpToggle(key) {
+  var btn = document.getElementById('btnMp' + key.charAt(0).toUpperCase() + key.slice(1));
+  if (mpState.on[key]) {                    // already shown -> hide
+    mpState.on[key] = false;
+    btn.classList.remove('active');
+    mpInfoText();
+    faceSyncMask();
+    return;
+  }
+  if (!state.tex) return;
+  btn.disabled = true;
+  var was = btn.textContent;
+  try {
+    if (!mpRunners[key]) { btn.textContent = 'Loading...'; await mpLoad(key); }
+    btn.textContent = 'Running...';
+    await nextFrame();
+    if (mpState.gen !== state.texGen) mpState.res = {};   // new photo: drop stale results
+    await mpRun(key);
+    mpState.on[key] = true;
+    btn.classList.add('active');
+    mpInfoText();
+    faceSyncMask();
+  } catch (e) {
+    toast(MP_TASKS[key].label + ' failed: ' + excerpt(e && e.message ? e.message : String(e)));
+  } finally {
+    btn.textContent = was;
+    btn.disabled = !state.tex;
+  }
+}
+
+function mpAnyOn() {
+  return Object.keys(MP_TASKS).some(function (k) {
+    return mpState.on[k] && mpState.res[k] && mpState.gen === state.texGen;
+  });
+}
+
+function mpClear() {
+  mpState.on = {};
+  mpState.res = {};
+  mpState.gen = -1;
+  Object.keys(MP_TASKS).forEach(function (k) {
+    var b = document.getElementById('btnMp' + k.charAt(0).toUpperCase() + k.slice(1));
+    if (b) b.classList.remove('active');
+  });
+  var el = document.getElementById('mpInfo');
+  if (el) { el.textContent = ''; el.hidden = true; }
+}
+
+/* Draw the enabled extra-task overlays. `map` is drawFaceMask's projection
+ * (normalized image coords -> screen px); it is affine, so the segmentation
+ * bitmap can be blitted with a matrix derived from three mapped corners. */
+function mpDrawOverlays(ctx, map) {
+  if (!mpAnyOn()) return;
+  var r;
+  if (mpState.on.seg && (r = mpState.res.seg)) {
+    var p00 = map(0, 0), p10 = map(1, 0), p01 = map(0, 1);
+    var w = r.canvas.width, h = r.canvas.height;
+    ctx.save();
+    ctx.globalAlpha = 0.4;
+    ctx.imageSmoothingEnabled = true;
+    // transform(), NOT setTransform(): map() returns CSS px and the context
+    // already carries the devicePixelRatio scale - replacing it would shrink
+    // the mask by 1/dpr into the top-left corner.
+    ctx.transform((p10.x - p00.x) / w, (p10.y - p00.y) / w,
+                  (p01.x - p00.x) / h, (p01.y - p00.y) / h, p00.x, p00.y);
+    ctx.drawImage(r.canvas, 0, 0);
+    ctx.restore();
+  }
+  function strokeSets(sets, conn, color, dot) {
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 2;
+    sets.forEach(function (lm) {
+      if (conn) {
+        ctx.beginPath();
+        conn.forEach(function (e) {
+          var a = map(lm[e.start].x, lm[e.start].y), b = map(lm[e.end].x, lm[e.end].y);
+          ctx.moveTo(a.x, a.y);
+          ctx.lineTo(b.x, b.y);
+        });
+        ctx.stroke();
+      }
+      ctx.fillStyle = color;
+      lm.forEach(function (p) {
+        var q = map(p.x, p.y);
+        ctx.beginPath();
+        ctx.arc(q.x, q.y, dot, 0, 6.283);
+        ctx.fill();
+      });
+    });
+  }
+  if (mpState.on.pose && (r = mpState.res.pose)) {
+    strokeSets(r.landmarks, mpRunners.poseConn, '#5fbf6f', 3);
+  }
+  if (mpState.on.hands && (r = mpState.res.hands)) {
+    strokeSets(r.landmarks, mpRunners.handConn, '#57d6d6', 2.5);
+  }
+  if (mpState.on.objects && (r = mpState.res.objects)) {
+    ctx.font = '600 12px system-ui, sans-serif';
+    ctx.textAlign = 'left';
+    r.items.forEach(function (o) {
+      var a = map(o.x0, o.y0), b = map(o.x1, o.y0), c = map(o.x1, o.y1), d = map(o.x0, o.y1);
+      ctx.strokeStyle = '#e8a33d';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(a.x, a.y);
+      ctx.lineTo(b.x, b.y);
+      ctx.lineTo(c.x, c.y);
+      ctx.lineTo(d.x, d.y);
+      ctx.closePath();
+      ctx.stroke();
+      var t = o.name + ' ' + Math.round(o.score * 100) + '%';
+      var tx = Math.min(a.x, d.x), ty = Math.min(a.y, b.y);
+      ctx.lineWidth = 3;
+      ctx.strokeStyle = 'rgba(0, 0, 0, 0.7)';
+      ctx.strokeText(t, tx + 3, ty - 4);
+      ctx.fillStyle = '#e8a33d';
+      ctx.fillText(t, tx + 3, ty - 4);
+    });
+  }
+}
+
+Object.keys(MP_TASKS).forEach(function (k) {
+  var id = 'btnMp' + k.charAt(0).toUpperCase() + k.slice(1);
+  document.getElementById(id).addEventListener('click', function () { mpToggle(k); });
+});
+
+document.getElementById('btnFaceDetect').addEventListener('click', function () { faceDetectRun(); });
+document.getElementById('btnFaceDeep').addEventListener('click', function () { faceDetectRun(true); });
+document.getElementById('btnFaceClear').addEventListener('click', faceClearAll);
+// Auto-detection: runs when the panel opens and when a new photo finishes
+// loading while the panel is open (once per image - the detGen guard).
+function faceMaybeAutoDetect() {
+  if (document.getElementById('facepanel').open && state.tex &&
+      faceState.detGen !== state.texGen &&
+      !document.getElementById('btnFaceDetect').disabled) {
+    faceDetectRun();
+  }
+}
+document.getElementById('facepanel').addEventListener('toggle', faceMaybeAutoDetect);
+document.getElementById('btnFaceDonor').addEventListener('click', function () {
+  document.getElementById('facedonorinput').click();
+});
+document.getElementById('facedonorinput').addEventListener('change', function () {
+  if (this.files && this.files[0]) faceLoadDonor(this.files[0]);
+  this.value = '';
+});
+(function () {
+  var b = document.getElementById('faceEyeBlend'), bv = document.getElementById('faceEyeVal');
+  function applyB(v) {
+    b.value = v;
+    bv.textContent = v + ' %';
+    faceState.eyeBlend = v / 100;
+    faceEditGen++;
+    requestRender();
+  }
+  b.addEventListener('input', function () { applyB(parseInt(b.value, 10) || 0); });
+  b.addEventListener('dblclick', function () { applyB(100); });
+  addDoubleTapReset(b, function () { applyB(100); });
+  // Donor-eye size / direction tweaks (all patched eyes; values in % / eye widths).
+  [['faceEyeSize', 'faceEyeSizeVal', 100, function (v) { faceState.eyeAdj.s = v / 100; }, function (v) { return v + ' %'; }],
+   ['faceEyeDirX', 'faceEyeDirXVal', 0, function (v) { faceState.eyeAdj.x = v / 100; }, String],
+   ['faceEyeDirY', 'faceEyeDirYVal', 0, function (v) { faceState.eyeAdj.y = v / 100; }, String]
+  ].forEach(function (spec) {
+    var inp = document.getElementById(spec[0]), val = document.getElementById(spec[1]);
+    function apply(v) {
+      inp.value = v;
+      val.textContent = spec[4](v);
+      spec[3](v);
+      faceEditGen++;
+      requestRender();
+    }
+    inp.addEventListener('input', function () { apply(parseInt(inp.value, 10) || 0); });
+    inp.addEventListener('dblclick', function () { apply(spec[2]); });
+    addDoubleTapReset(inp, function () { apply(spec[2]); });
+  });
+  var maskBtns = document.querySelectorAll('.face-maskbtn');
+  maskBtns.forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      faceState.maskMode = btn.dataset.maskmode;
+      maskBtns.forEach(function (o) { o.classList.toggle('active', o === btn); });
+      faceSyncMask();
+    });
+  });
+})();
 
 updateSupportChip();
 if (window.Supporter) {

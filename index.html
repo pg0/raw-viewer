@@ -910,7 +910,7 @@
           <button class="face-maskbtn" id="btnMpObjects">Objects</button>
           <button class="face-maskbtn" id="btnMpScene">Scene</button>
           <button class="face-maskbtn" id="btnMpSeg">Segments</button>
-          <button class="face-maskbtn" id="btnMpTouch" title="Click an object on the photo to segment it (MediaPipe MagicTouch)">Touch</button>
+          <button class="face-maskbtn" id="btnMpTouch" title="Click an object on the photo to segment it (MediaPipe MagicTouch)">Select</button>
           <button class="face-maskbtn" id="btnMpPose">Pose</button>
           <button class="face-maskbtn" id="btnMpHands">Hands</button>
         </div>
@@ -6511,11 +6511,11 @@ function faceBuildSmileSliders() {
     mkRow(grid, 'Mouth height', 70, 130, 100, function (v) { return v + ' %'; },
       Math.round((f.height || 1) * 100),
       function (v) { f.height = v / 100; });
-    // Whole-mouth shift along the mouth axis, % of mouth width. For mouths
-    // the detector placed a touch off-centre (or an asymmetric grin).
-    mkRow(grid, 'Mouth pos X', -20, 20, 0, function (v) { return v + ' %'; },
-      Math.round((f.mx || 0) * 100),
-      function (v) { f.mx = v / 100; });
+    // Whole-mouth shift along the face axis (+ = toward the nose), % of
+    // mouth width. For a close result that sits a touch too low or high.
+    mkRow(grid, 'Mouth pos Y', -20, 20, 0, function (v) { return v + ' %'; },
+      Math.round((f.my || 0) * 100),
+      function (v) { f.my = v / 100; });
     // Positive raises the brows WITH the upper lids - the eyes open and the
     // look lifts (friendliness), the brows stay close to the eyes. A small
     // negative lowers them toward a frown.
@@ -6572,7 +6572,7 @@ function faceAiShape(f, s) {
  * use. AI Smile only pushes up ([0, 1.5]), Model smile only relaxes down
  * ([-1, 0]) - so neither undoes what the face already does. */
 var faceAiBusy = false;
-async function faceAiSolve(btnId, target, lo, hi, shut) {
+async function faceAiSolve(btnId, target, lo, hi, shut, arch) {
   var faces = (faceState.detGen === state.texGen) ? faceState.faces : null;
   var btn = document.getElementById(btnId);
   if (!faces || !faces.length || faceAiBusy) return;
@@ -6586,6 +6586,7 @@ async function faceAiSolve(btnId, target, lo, hi, shut) {
   function put(f, s) {
     f.smile = s;
     f.close = shut;
+    f.arch = arch;
     var sh = faceAiShape(f, s);
     f.width = sh.width;
     f.height = sh.height;
@@ -7044,7 +7045,7 @@ function faceSmileControls(f, W, H) {
   var P = [], D = [], ids = [];   // ids: landmark index per movable point (-1 = anchor)
   var wfac = (f.width || 1) - 1;    // independent mouth-width morph (1 = neutral)
   var hfac = (f.height || 1) - 1;   // independent mouth-height morph (1 = neutral)
-  var xfac = f.mx || 0;             // whole-mouth shift along the mouth axis, in mw
+  var yfac = f.my || 0;             // whole-mouth shift along the face axis (+ = up), in mw
   /* Mouth close: the model look needs the lips shut, otherwise a laughing
    * mouth just flattens with the teeth still out. Each inner-lip point moves
    * to the midpoint between itself and its across-mouth partner (the lip
@@ -7131,7 +7132,11 @@ function faceSmileControls(f, W, H) {
         // the worst allowed outcome. The chord pull scales with the gap so
         // an already-closed mouth is left completely alone.
         var basev = hi2 - 0.12 * gap;
-        var chord = vCL + (t + 1) / 2 * (vCR - vCL) - mw * 0.025 * (1 - Math.abs(t));
+        // Centre dip below the chord = the smile in the closed line. Neutral
+        // and Model close identically otherwise - the dip IS their visible
+        // difference (Neutral a clear hint of :), Model near straight).
+        var dip = f.arch != null ? f.arch : 0.025;
+        var chord = vCL + (t + 1) / 2 * (vCR - vCL) - mw * dip * (1 - Math.abs(t));
         var blend = 0.85 * Math.min(1, gap / (0.06 * mw));
         var T2 = basev + blend * (chord - basev);
         // +-2.5% overshoot past the meet: the contours overlap slightly, so
@@ -7143,8 +7148,8 @@ function faceSmileControls(f, W, H) {
     }
     P.push(p);
     ids.push(idx);
-    D.push({ x: s * mw * (ax.x * wide + up.x * rise) + ax.x * (wfac * axial + xfac * mw) + up.x * (hfac * vert + shut),
-             y: s * mw * (ax.y * wide + up.y * rise) + ax.y * (wfac * axial + xfac * mw) + up.y * (hfac * vert + shut) });
+    D.push({ x: s * mw * (ax.x * wide + up.x * rise) + ax.x * wfac * axial + up.x * (hfac * vert + yfac * mw + shut),
+             y: s * mw * (ax.y * wide + up.y * rise) + ax.y * wfac * axial + up.y * (hfac * vert + yfac * mw + shut) });
   }
   FACE_LIP_RING.forEach(function (idx) { lipTarget(idx, false); });
   FACE_LIP_INNER.forEach(function (idx) { lipTarget(idx, true); });
@@ -7280,7 +7285,7 @@ function faceEyeUniforms() {
 function faceMorphActive(f) {
   return Math.abs(f.smile || 0) > 0.005 || Math.abs((f.width || 1) - 1) > 0.005 ||
          Math.abs((f.height || 1) - 1) > 0.005 || (f.close || 0) > 0.005 ||
-         Math.abs(f.brow || 0) > 0.005 || Math.abs(f.mx || 0) > 0.005;
+         Math.abs(f.brow || 0) > 0.005 || Math.abs(f.my || 0) > 0.005;
 }
 
 // How shut this mouth is being driven (close term or negative smile slider).
@@ -7626,11 +7631,12 @@ function faceProtectTexture(W, H) {
   var sig = [state.texGen, faceState.protect, faceState.barWhite, FACE_PROT_EMOJI,
              faceState.faces.length, W, H,
              faceState.faces.map(function (f) {
-               // smile/close/width/height/mx move the lip-seal seam
+               // smile/close/width/height/my move the lip-seal seam
                return Math.round(f.lm[1].x * 1e4) + faceProtMode(f) + faceProtEmojiOf(f) +
                       '~' + Math.round((f.smile || 0) * 100) + '~' + (f.close || 0) +
                       '~' + Math.round((f.width || 1) * 100) + '~' + Math.round((f.height || 1) * 100) +
-                      '~' + Math.round((f.mx || 0) * 100);
+                      '~' + Math.round((f.my || 0) * 100) +
+                      '~' + (f.arch != null ? f.arch : 0.025);
              }).join(',')].join(':');
   if (faceProtTex && sig === faceProtSig) return faceProtTex;
   var cvs = faceProtectCanvas(W, H);
@@ -7776,7 +7782,7 @@ function faceResetMaskMode() {
 function faceResetEdits() {
   if (typeof captureAbBefore === 'function' && !abShowing) captureAbBefore();
   if (faceState.faces) {
-    faceState.faces.forEach(function (f) { f.smile = 0; f.width = 1; f.height = 1; f.close = 0; f.brow = 0; f.mx = 0; });
+    faceState.faces.forEach(function (f) { f.smile = 0; f.width = 1; f.height = 1; f.close = 0; f.brow = 0; f.my = 0; f.arch = null; });
   }
   faceState.eyeBlend = 1;
   faceState.eyeAdj = { s: 1, x: 0, y: 0, a: 0 };
@@ -8173,7 +8179,7 @@ var MP_TASKS = {
   // masks whatever you point at. Needs a click before it can produce anything,
   // so mpRun leaves it empty and the pointer handler feeds it the point.
   touch: {
-    label: 'Touch', model: 'face/magic_touch.tflite', cls: 'InteractiveSegmenter',
+    label: 'Select', model: 'face/magic_touch.tflite', cls: 'InteractiveSegmenter',
     opts: { outputCategoryMask: true, outputConfidenceMasks: false }, needsPoint: true
   },
   // Pose/hand thresholds are well below the 0.5 defaults on purpose: in group
@@ -8786,13 +8792,13 @@ document.getElementById('btnFaceDetect').addEventListener('click', function () {
 document.getElementById('btnFaceDeep').addEventListener('click', function () { faceDetectRun(true); });
 document.getElementById('btnFaceClear').addEventListener('click', faceClearAll);
 document.getElementById('btnFaceAiSmile').addEventListener('click', function () {
-  faceAiSolve('btnFaceAiSmile', FACE_AI_SMILE, 0, 1.5, 0);
+  faceAiSolve('btnFaceAiSmile', FACE_AI_SMILE, 0, 1.5, 0, 0.025);
 });
 document.getElementById('btnFaceNeutralSmile').addEventListener('click', function () {
-  faceAiSolve('btnFaceNeutralSmile', FACE_AI_NEUTRAL, -1, 0.75, 1);
+  faceAiSolve('btnFaceNeutralSmile', FACE_AI_NEUTRAL, -1, 0.75, 1, 0.035);
 });
 document.getElementById('btnFaceModelSmile').addEventListener('click', function () {
-  faceAiSolve('btnFaceModelSmile', FACE_AI_MODEL, -1, 0, 1);
+  faceAiSolve('btnFaceModelSmile', FACE_AI_MODEL, -1, 0, 1, 0.005);
 });
 // Auto-detection: runs when the panel opens and when a new photo finishes
 // loading while the panel is open (once per image - the detGen guard).

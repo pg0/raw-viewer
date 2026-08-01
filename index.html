@@ -3426,18 +3426,25 @@ function acSolveLight(s) {
   var lo = acPct(bins, n, 0.0025), mid = acPct(bins, n, 0.5), hi = acPct(bins, n, 0.9975);
   var p25 = acPct(bins, n, 0.25), p75 = acPct(bins, n, 0.75);
 
-  // Exposure: correct only when the median sits clearly OUTSIDE a normal band,
-  // and then only up to the near edge of that band. Chasing a single mid-grey
-  // anchor is the classic auto-exposure failure - it drags every deliberately
-  // high-key or low-key frame to the middle, which is exactly the wrong answer
-  // on the pictures worth keeping. Measured against a finished, hand-graded
-  // photo this band is the difference between "nothing to do" and -0.7 EV.
-  var EV_LO = 0.33, EV_HI = 0.62;
+  /* Exposure: correct only when the median sits clearly OUTSIDE a normal band,
+   * and then only up to the near edge. Chasing a single mid-grey anchor is the
+   * classic auto-exposure failure - it drags every deliberately high-key or
+   * low-key frame to the middle, which is the wrong answer on exactly the
+   * pictures worth keeping.
+   *
+   * The band has to sit where FINISHED photos live, not where RAWs land. The
+   * first version ran 0.33..0.62, which put finished brightness at the ceiling:
+   * a hand-graded reference measures a median of 0.624, so any flat RAW sitting
+   * mid-band (this camera's neutral render is 0.490) was declared fine and got
+   * no lift at all, while a bright one was pulled DOWN below where finished
+   * work sits. Both of those read as "exposure is not detected correctly", and
+   * they were the same off-by-a-band mistake. */
+  var EV_LO = 0.55, EV_HI = 0.70;
   var ev = 0;
   if (mid < EV_LO || mid > EV_HI) {
     var midLin = acS2L(mid);
     if (midLin > 1e-4) {
-      ev = acClamp(Math.log2(acS2L(mid < EV_LO ? EV_LO : EV_HI) / midLin) * 0.7, -1.5, 1.5);
+      ev = acClamp(Math.log2(acS2L(mid < EV_LO ? EV_LO : EV_HI) / midLin) * 0.85, -1.5, 1.5);
     }
   }
 
@@ -3465,6 +3472,26 @@ function acSolveLight(s) {
       if (acContrast(q75, cm) - acContrast(q25, cm) < tgt) clo = cm; else chi = cm;
     }
     sol.contrast = acClamp((clo + chi) * 0.5 * 0.85, -1, 1);
+  }
+
+  /* Exposure, revisited once contrast is known. The contrast curve pivots at
+   * 0.5, so every frame whose midtones sit above that gets pushed brighter by
+   * the very step that fixed its spread - measured on a bright RAW, the median
+   * ran 0.682 -> 0.760 with exposure solved at 0. That is precisely the manual
+   * exposure pull a photographer reaches for after adding contrast, so do it
+   * here instead of leaving it as homework. Bisect the stop with contrast held:
+   * what has to land in the band is the median the eye finally sees. */
+  var medOut = acContrast(acClamp(acPredict(mid, ev, sol), 0, 1), sol.contrast);
+  if (medOut > EV_HI || medOut < EV_LO) {
+    var wantMed = medOut > EV_HI ? EV_HI : EV_LO;
+    var elo = -2, ehi = 2, em;
+    for (t = 0; t < 24; t++) {
+      em = (elo + ehi) * 0.5;
+      if (acContrast(acClamp(acPredict(mid, em, sol), 0, 1), sol.contrast) < wantMed) elo = em;
+      else ehi = em;
+    }
+    ev = acClamp((elo + ehi) * 0.5, -1.5, 1.5);
+    sol.exposure = ev;
   }
 
   /* Clipped / crushed mass -> recovery, counted AFTER contrast rather than on

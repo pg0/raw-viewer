@@ -4870,10 +4870,44 @@ async function loadFile(file) {
     thumbImg.style.display = 'none';
     dropzone.classList.remove('hidden');
   }
+  if (ok) applyCameraAspect(metaText);
   if (ok && typeof measureContrastPivot === 'function') measureContrastPivot();
   } finally {
     state.busy = false;
   }
+}
+
+/* Honour the frame the camera was set to.
+ *
+ * Shoot a Sony in 16:9 and the raw still carries the whole 3:2 sensor, with the
+ * intended frame recorded only as a tag. LibRaw hands back everything, so the
+ * picture opens with about 16% more height than was composed through the
+ * viewfinder - measured on a ZV-E1 16:9 frame, decoded 1.4954 against a tagged
+ * 1.7785. Nothing is corrupted or stretched: the extra rows are ordinary scene.
+ * It just is not the picture that was taken, which is what "distortion" turned
+ * out to mean when it was reported.
+ *
+ * Applied as an ordinary starting crop, so it shows up in the crop tool and can
+ * be reset like any other - the full sensor is still there for anyone who wants
+ * the extra room. Only fires on a real disagreement (>2%), so a plain 3:2 frame
+ * is untouched. */
+function applyCameraAspect(metaText) {
+  if (!metaText || !state.texW || !state.texH) return;
+  if (state.crop && (state.crop.w !== 1 || state.crop.h !== 1)) return;
+  var m = /Full size:\s*(\d+)\s*x\s*(\d+)/.exec(metaText);
+  if (!m) return;
+  var tagW = +m[1], tagH = +m[2];
+  if (!(tagW > 0 && tagH > 0)) return;
+  var want = tagW / tagH, have = state.texW / state.texH;
+  if (!(want > 0.2 && want < 5)) return;
+  if (Math.abs(want - have) / have < 0.02) return;
+
+  var cw = 1, ch = 1;
+  if (want > have) ch = have / want;   // wider frame tagged: trim top and bottom
+  else cw = want / have;               // taller frame tagged: trim the sides
+  state.crop = { x: (1 - cw) / 2, y: (1 - ch) / 2, w: cw, h: ch };
+  toast('Camera framing applied: ' + tagW + ' x ' + tagH +
+    '. The raw holds the full sensor - reset the crop to see all of it.');
 }
 
 /* Load dcraw's embedded JPEG as the working image (fallback for undecodable

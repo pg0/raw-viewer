@@ -3355,6 +3355,18 @@ function acPct(bins, total, p) {
 }
 // The shader's contrast step: mix(rgb, smoothstep(0,1,rgb), amount).
 function acContrast(v, amt) { return v + amt * (v * v * (3 - 2 * v) - v); }
+// Inverse of it. Monotonic for any amount in [-1,1] (the slope is 1 + amt*(s'-1)
+// with s' in [0,1.5], so it never turns over), which makes bisection safe;
+// 24 halvings land far inside a slider step.
+function acContrastInv(target, amt) {
+  if (Math.abs(amt) < 1e-4) return target;
+  var lo = 0, hi = 1, mid;
+  for (var i = 0; i < 24; i++) {
+    mid = (lo + hi) * 0.5;
+    if (acContrast(mid, amt) < target) lo = mid; else hi = mid;
+  }
+  return (lo + hi) * 0.5;
+}
 
 /* Where an sRGB level lands after exposure + the tone-region block. Both run
  * BEFORE contrast in the shader, so solving contrast against the raw
@@ -3404,45 +3416,27 @@ function acSolveLight(s) {
     }
   }
 
-  var g = Math.pow(2, ev);
-  var hiLin = acS2L(hi) * g, loLin = acS2L(lo) * g;
-  var hiS = acL2S(hiLin), loS = acL2S(loLin);   // where the endpoints land after exposure
-
-  // Whites: f = exp2(whites * 0.7 * whMask). Brighten-only, and only a white
-  // point that is actually dull - one already near the top is either fine or
-  // clipping, and clipping is highlights' job.
-  var whMask = acSstep(0.65, 1.0, hiS);
-  var whites = 0;
-  if (hiS < 0.95 && whMask > 0.02 && hiLin > 1e-4) {
-    whites = acClamp(Math.log2(acS2L(0.97) / hiLin) / (0.7 * whMask) * 0.8, 0, 1);
-  }
-  // Blacks: negative branch is newLuma *= exp2(blacks * 1.5 * blMask). Deepen-
-  // only - lifting a black point that already sits near zero buys nothing, and
-  // crushed shadows are shadows' job. The 0.08 floor is the line between a
-  // milky black point (a defect) and a lifted one (a grade); a finished film
-  // look sits around 0.06 and must come back untouched.
-  var blMask = 1 - acSstep(0, 0.35, loS);
-  var blacks = 0;
-  if (loS > 0.08 && blMask > 0.02 && loLin > 1e-5) {
-    blacks = acClamp(Math.log2(acS2L(0.04) / loLin) / (1.5 * blMask) * 0.6, -1, 0);
-  }
   // Clipped / crushed mass -> recovery. The 0.5% floor is the specular
   // allowance: a sky with a sun in it is not a broken exposure.
   var clipN = 0, crushN = 0;
   for (i = 250; i < 256; i++) clipN += bins[i];
   for (i = 0; i < 6; i++) crushN += bins[i];
   var clipF = clipN / n, crushF = crushN / n;
-  var highlights = clipF > 0.005 ? -acClamp((clipF - 0.005) / 0.06, 0, 1) * 0.6 : 0;
-  var shadows = crushF > 0.005 ? acClamp((crushF - 0.005) / 0.08, 0, 1) * 0.6 : 0;
+  var sol = {
+    exposure: ev, whites: 0, blacks: 0, contrast: 0,
+    highlights: clipF > 0.005 ? -acClamp((clipF - 0.005) / 0.06, 0, 1) * 0.6 : 0,
+    shadows: crushF > 0.005 ? acClamp((crushF - 0.005) / 0.08, 0, 1) * 0.6 : 0
+  };
 
-  var sol = { exposure: ev, whites: whites, blacks: blacks,
-              highlights: highlights, shadows: shadows, contrast: 0 };
-
-  /* Contrast: solved on the INTER-QUARTILE spread, after pushing p25/p75
-   * through everything above. The quartiles are the midtones - the part
-   * contrast actually controls - and they ignore the outliers that make the
-   * 5/95 spread jumpy. The shader step mixes linearly toward smoothstep, so
-   * the spread after applying amount c is
+  /* Contrast, solved BEFORE the endpoints. It runs last in the shader and moves
+   * the ends hard, so anything solved before it gets overshot - see the endpoint
+   * block below. Whites and blacks cannot disturb this step in return: their
+   * masks are identically zero at the quartiles.
+   *
+   * Solved on the INTER-QUARTILE spread. The quartiles are the midtones, the
+   * part contrast actually controls, and they ignore the outliers that make a
+   * 5/95 spread jumpy. The shader step mixes linearly toward smoothstep, so the
+   * spread after applying amount c is
    *     spread + c * ((s75 - s25) - spread)
    * which inverts in closed form. No search, no iteration.
    * Measured band: finished photos sit near 0.28, this camera's neutral RAW
@@ -3454,6 +3448,31 @@ function acSolveLight(s) {
     if (Math.abs(den) > 1e-3) {
       sol.contrast = acClamp(((iqr < 0.26 ? 0.28 : 0.32) - iqr) / den * 0.85, -1, 1);
     }
+  }
+
+  /* Endpoints, aimed so they land on target AFTER contrast has had its turn.
+   * Solving them against the pre-contrast value made the two compound: measured
+   * on this camera, blacks put the black point on its 0.04 target and contrast
+   * then dragged it to 0.031, with p05 collapsing 0.204 -> 0.117. Inverting the
+   * target through the contrast curve first costs one bisection and stops it. */
+  var tHi = acContrastInv(0.97, sol.contrast), tLo = acContrastInv(0.04, sol.contrast);
+  var hiS = acPredict(hi, ev, sol), loS = acPredict(lo, ev, sol);
+  var hiLin = acS2L(hiS), loLin = acS2L(loS);
+
+  // Whites: f = exp2(whites * 0.7 * whMask). Brighten-only, and only a white
+  // point that is still dull once contrast is in - one already near the top is
+  // either fine or clipping, and clipping is highlights' job.
+  var whMask = acSstep(0.65, 1.0, hiS);
+  if (acContrast(hiS, sol.contrast) < 0.95 && whMask > 0.02 && hiLin > 1e-4) {
+    sol.whites = acClamp(Math.log2(acS2L(tHi) / hiLin) / (0.7 * whMask) * 0.8, 0, 1);
+  }
+  // Blacks: negative branch is newLuma *= exp2(blacks * 1.5 * blMask). Deepen-
+  // only - lifting a black point that already sits near zero buys nothing, and
+  // crushed shadows are shadows' job. The floor is checked on the post-contrast
+  // value, which is the one the eye judges.
+  var blMask = 1 - acSstep(0, 0.35, loS);
+  if (acContrast(loS, sol.contrast) > 0.06 && blMask > 0.02 && loLin > 1e-5) {
+    sol.blacks = acClamp(Math.log2(acS2L(tLo) / loLin) / (1.5 * blMask) * 0.6, -1, 0);
   }
   return sol;
 }

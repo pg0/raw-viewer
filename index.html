@@ -1703,9 +1703,15 @@ var FRAG_SRC = [
   '  float lg = pow(clamp(luma, 0.0, 1.0), 1.0 / 2.2);',
   '  float hiMask = smoothstep(0.4, 0.95, lg);',
   '  float shMask = 1.0 - smoothstep(0.1, 0.6, lg);',
-  '  float whMask = smoothstep(0.65, 1.0, lg);',
+  // Whites sets the white POINT, so it has to reach the top quarter of the
+  // range, not just the last few percent. It used to ramp over 0.65..1.0 AND be
+  // scaled by 0.7, which left it delivering a 3% lift at p95 - maxed, it moved
+  // nothing below the 99th percentile and read as a dead control. 0.5..1.0 at
+  // full weight still leaves the median untouched (that is exposure's job) and
+  // gives it real authority where a white point actually lives.
+  '  float whMask = smoothstep(0.5, 1.0, lg);',
   '  float blMask = 1.0 - smoothstep(0.0, 0.35, lg);',
-  '  float f = exp2(u_highlights * hiMask + u_shadows * shMask + u_whites * 0.7 * whMask);',
+  '  float f = exp2(u_highlights * hiMask + u_shadows * shMask + u_whites * whMask);',
   '  float newLuma = luma * f;',
   '  if (u_blacks >= 0.0) {',
   '    newLuma += u_blacks * 0.08 * blMask * blMask;',
@@ -1729,9 +1735,22 @@ var FRAG_SRC = [
   '  // 4. Linear to sRGB (exact piecewise curve)',
   '  rgb = linToSrgb(rgb);',
   '',
-  '  // 5. Contrast: S-curve around 0.5 in gamma space',
-  '  vec3 sc = smoothstep(vec3(0.0), vec3(1.0), rgb);',
-  '  rgb = mix(rgb, sc, u_contrast);',
+  // 5. Contrast: S-curve around 0.5 in gamma space, built as a power on each
+  //    side of the pivot. The slope AT the pivot is exactly k, so the control
+  //    has no ceiling - the old mix-toward-smoothstep topped out at 1.5x midtone
+  //    slope at the maximum setting while halving the slope at 0.1 and 0.9,
+  //    which is why maxed contrast still read flat and killed the ends.
+  //    k = 3^contrast: exact identity at 0, 3x midtone slope at +1, 1/3 at -1.
+  //    At matched midtone slope this shape is also GENTLER on the shadows than
+  //    smoothstep was (0.67 vs 0.54 at level 0.1), so the extra punch does not
+  //    come out of shadow detail.
+  '  if (u_contrast != 0.0) {',
+  '    vec3 k = vec3(pow(3.0, u_contrast));',
+  '    vec3 c0 = clamp(rgb, 0.0, 1.0);',
+  '    vec3 lo = 0.5 * pow(max(c0 * 2.0, vec3(1e-6)), k);',
+  '    vec3 hi = 1.0 - 0.5 * pow(max((1.0 - c0) * 2.0, vec3(1e-6)), k);',
+  '    rgb = mix(lo, hi, step(vec3(0.5), c0));',
+  '  }',
   '',
   '  // 6. Saturation, then vibrance (boosts low-sat pixels more)',
   '  float lum = dot(rgb, LUMA);',
@@ -3353,8 +3372,14 @@ function acPct(bins, total, p) {
   for (var i = 0; i < 256; i++) { acc += bins[i]; if (acc >= want) return i / 255; }
   return 1;
 }
-// The shader's contrast step: mix(rgb, smoothstep(0,1,rgb), amount).
-function acContrast(v, amt) { return v + amt * (v * v * (3 - 2 * v) - v); }
+// The shader's contrast step, kept bit-for-bit in step with it: a power curve
+// on each side of the 0.5 pivot, k = 3^amount. Slope at the pivot is exactly k.
+function acContrast(v, amt) {
+  if (!amt) return v;
+  v = v < 0 ? 0 : (v > 1 ? 1 : v);
+  var k = Math.pow(3, amt);
+  return v < 0.5 ? 0.5 * Math.pow(v * 2, k) : 1 - 0.5 * Math.pow((1 - v) * 2, k);
+}
 // Inverse of it. Monotonic for any amount in [-1,1] (the slope is 1 + amt*(s'-1)
 // with s' in [0,1.5], so it never turns over), which makes bisection safe;
 // 24 halvings land far inside a slider step.
@@ -3377,7 +3402,7 @@ function acPredict(v, ev, p) {
   var lg = acL2S(lin);
   var f = Math.pow(2, p.highlights * acSstep(0.4, 0.95, lg) +
                      p.shadows * (1 - acSstep(0.1, 0.6, lg)) +
-                     p.whites * 0.7 * acSstep(0.65, 1.0, lg));
+                     p.whites * acSstep(0.5, 1.0, lg));
   var blMask = 1 - acSstep(0, 0.35, lg);
   lin *= f;
   if (p.blacks >= 0) lin += p.blacks * 0.08 * blMask * blMask;
@@ -3416,17 +3441,7 @@ function acSolveLight(s) {
     }
   }
 
-  // Clipped / crushed mass -> recovery. The 0.5% floor is the specular
-  // allowance: a sky with a sun in it is not a broken exposure.
-  var clipN = 0, crushN = 0;
-  for (i = 250; i < 256; i++) clipN += bins[i];
-  for (i = 0; i < 6; i++) crushN += bins[i];
-  var clipF = clipN / n, crushF = crushN / n;
-  var sol = {
-    exposure: ev, whites: 0, blacks: 0, contrast: 0,
-    highlights: clipF > 0.005 ? -acClamp((clipF - 0.005) / 0.06, 0, 1) * 0.6 : 0,
-    shadows: crushF > 0.005 ? acClamp((crushF - 0.005) / 0.08, 0, 1) * 0.6 : 0
-  };
+  var sol = { exposure: ev, whites: 0, blacks: 0, contrast: 0, highlights: 0, shadows: 0 };
 
   /* Contrast, solved BEFORE the endpoints. It runs last in the shader and moves
    * the ends hard, so anything solved before it gets overshot - see the endpoint
@@ -3435,20 +3450,41 @@ function acSolveLight(s) {
    *
    * Solved on the INTER-QUARTILE spread. The quartiles are the midtones, the
    * part contrast actually controls, and they ignore the outliers that make a
-   * 5/95 spread jumpy. The shader step mixes linearly toward smoothstep, so the
-   * spread after applying amount c is
-   *     spread + c * ((s75 - s25) - spread)
-   * which inverts in closed form. No search, no iteration.
+   * 5/95 spread jumpy. The spread is monotonic in the amount but no longer
+   * linear in it (the curve is a power, not a mix), so it is bisected rather
+   * than inverted in closed form - 24 halvings, still nothing measurable.
    * Measured band: finished photos sit near 0.28, this camera's neutral RAW
-   * render at 0.21. Outside the band, aim at the near edge, never the centre. */
+   * render at 0.21. Inside the band, leave it alone. */
   var q25 = acPredict(p25, ev, sol), q75 = acPredict(p75, ev, sol);
   var iqr = q75 - q25;
   if (iqr > 0.01 && (iqr < 0.26 || iqr > 0.36)) {
-    var den = (acContrast(q75, 1) - acContrast(q25, 1)) - iqr;
-    if (Math.abs(den) > 1e-3) {
-      sol.contrast = acClamp(((iqr < 0.26 ? 0.28 : 0.32) - iqr) / den * 0.85, -1, 1);
+    var tgt = iqr < 0.26 ? 0.30 : 0.32;
+    var clo = -1, chi = 1, cm;
+    for (var t = 0; t < 24; t++) {
+      cm = (clo + chi) * 0.5;
+      if (acContrast(q75, cm) - acContrast(q25, cm) < tgt) clo = cm; else chi = cm;
     }
+    sol.contrast = acClamp((clo + chi) * 0.5 * 0.85, -1, 1);
   }
+
+  /* Clipped / crushed mass -> recovery, counted AFTER contrast rather than on
+   * the input. Contrast is what pushes highlights over the edge, so reading the
+   * input under-reports exactly when it matters - and the leftover blown
+   * highlights are what forces a manual exposure pull afterwards. Mapping the
+   * 256 bin centres through the chain is enough: the transfer is monotonic, so
+   * no bin can overtake another and the counts stay exact.
+   * The 0.5% floor is the specular allowance - a sky with a sun in it is not a
+   * broken exposure. */
+  var clipN = 0, crushN = 0;
+  for (i = 0; i < 256; i++) {
+    if (!bins[i]) continue;
+    var vOut = acContrast(acClamp(acPredict(i / 255, ev, sol), 0, 1), sol.contrast);
+    if (vOut >= 250 / 255) clipN += bins[i];
+    else if (vOut <= 5 / 255) crushN += bins[i];
+  }
+  var clipF = clipN / n, crushF = crushN / n;
+  sol.highlights = clipF > 0.005 ? -acClamp((clipF - 0.005) / 0.06, 0, 1) * 0.6 : 0;
+  sol.shadows = crushF > 0.005 ? acClamp((crushF - 0.005) / 0.08, 0, 1) * 0.6 : 0;
 
   /* Endpoints, aimed so they land on target AFTER contrast has had its turn.
    * Solving them against the pre-contrast value made the two compound: measured
@@ -3462,16 +3498,16 @@ function acSolveLight(s) {
   // Whites: f = exp2(whites * 0.7 * whMask). Brighten-only, and only a white
   // point that is still dull once contrast is in - one already near the top is
   // either fine or clipping, and clipping is highlights' job.
-  var whMask = acSstep(0.65, 1.0, hiS);
+  var whMask = acSstep(0.5, 1.0, hiS);
   if (acContrast(hiS, sol.contrast) < 0.95 && whMask > 0.02 && hiLin > 1e-4) {
-    sol.whites = acClamp(Math.log2(acS2L(tHi) / hiLin) / (0.7 * whMask) * 0.8, 0, 1);
+    sol.whites = acClamp(Math.log2(acS2L(tHi) / hiLin) / whMask * 0.8, 0, 1);
   }
   // Blacks: negative branch is newLuma *= exp2(blacks * 1.5 * blMask). Deepen-
   // only - lifting a black point that already sits near zero buys nothing, and
   // crushed shadows are shadows' job. The floor is checked on the post-contrast
   // value, which is the one the eye judges.
   var blMask = 1 - acSstep(0, 0.35, loS);
-  if (acContrast(loS, sol.contrast) > 0.06 && blMask > 0.02 && loLin > 1e-5) {
+  if (acContrast(loS, sol.contrast) > 0.08 && blMask > 0.02 && loLin > 1e-5) {
     sol.blacks = acClamp(Math.log2(acS2L(tLo) / loLin) / (1.5 * blMask) * 0.6, -1, 0);
   }
   return sol;

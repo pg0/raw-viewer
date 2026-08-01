@@ -350,6 +350,22 @@
   .grpreset:hover:not(:disabled) { background: none; border: none; color: #e6e6e6; }
   .grpreset:active:not(:disabled) { background: none; }
 
+  /* Per-group "solve it for me" button. Sits left of the reset, so the pair
+   * reads solve -> undo-it-all. Text, not an icon: it writes sliders, and that
+   * is a bigger promise than an icon can make. */
+  .grpauto {
+    background: #333; border: 1px solid #4d4d4d; border-radius: 4px;
+    padding: 2px 8px; margin: 0 0 0 auto;
+    color: #ddd; cursor: pointer;
+    font-family: inherit; font-size: 10px; font-weight: 700; letter-spacing: .8px;
+    line-height: 1.5;
+    display: inline-flex; align-items: center;
+  }
+  .grpauto:hover:not(:disabled) { background: #3d3d3d; border-color: #7a6237; color: #e6a94e; }
+  .grpauto:active:not(:disabled) { background: #2b2b2b; }
+  .grpauto:disabled { opacity: .45; cursor: default; }
+  .grpauto + .grpreset { margin-left: 0; }
+
   .togglerow {
     display: flex; align-items: center; gap: 8px;
     font-size: 12px; color: #bbb;
@@ -3227,6 +3243,464 @@ function updateHistogram() {
 }
 
 /* ============================================================
+ * Auto Light / Auto Color
+ * ------------------------------------------------------------
+ * Two solvers that measure the image and WRITE the visible sliders. Nothing
+ * runs hidden: whatever Auto decides shows up as slider values you can read,
+ * nudge, undo or reset - the same contract Smile Detect's Auto already has.
+ *
+ * Both measure the same sample: the base rendered with every grade param at
+ * its default (drawQuad effects=false -> linear->sRGB only, no tone curve, no
+ * LUT, no vignette). Solving against a NEUTRAL render is what makes the answer
+ * absolute - the numbers are the slider values, not deltas on the current look
+ * - so pressing Auto twice lands on the same place instead of compounding.
+ *
+ *   Auto Light  robust endpoints (percentiles, never min/max: one hot pixel
+ *               must not define the white point), midtone spread, and
+ *               clip/crush counts -> exposure, contrast, whites, blacks,
+ *               highlights, shadows.
+ *   Auto Color  neutral-midtone estimate from the lowest-chroma pixels
+ *               -> temperature, tint; mean saturation -> vibrance.
+ *
+ * Each control owns exactly one job, so they never fight: exposure sets the
+ * midtone level, contrast sets the midtone SLOPE, whites stretches a dull white
+ * point up, highlights recovers clipping, blacks deepens a washed-out black
+ * point, shadows opens crushed ones. Gamma and saturation stay out of it -
+ * those really are taste, and an auto that guesses at taste is one you switch
+ * off.
+ *
+ * Contrast is in, and it is the one that matters most on a RAW. A neutral
+ * linear->sRGB render is flat by construction - the file has no tone curve
+ * baked in - so the endpoints can look fine while the midtones sit in a narrow
+ * band. Measured: this camera's neutral render has an inter-quartile spread of
+ * 0.21 against 0.28 for a finished, hand-graded photo. Endpoint controls cannot
+ * reach that; only the midtone slope can. Leaving contrast out is what made the
+ * first version do almost nothing to a RAW.
+ * ============================================================ */
+var autoFB = null;
+var AUTO_MAX = 256;   // sample buffer long edge; ~40-65k px is plenty for percentiles
+
+function ensureAutoFB() {
+  if (autoFB) return;
+  var tex = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, tex);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, AUTO_MAX, AUTO_MAX, 0,
+    gl.RGBA, gl.UNSIGNED_BYTE, null);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+  var fbo = gl.createFramebuffer();
+  gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  autoFB = { fbo: fbo, tex: tex, px: new Uint8Array(AUTO_MAX * AUTO_MAX * 4) };
+}
+
+/* Aspect of what is actually framed (rotation + crop) - same math viewFit uses
+ * to derive its fit scale. Sizing the sample viewport to it means letterbox
+ * fits exactly: no bars poisoning the black point, no cover-crop throwing away
+ * a third of the frame the way a fixed-aspect buffer would. */
+function autoVisibleAspect(angleDeg, crop) {
+  var m = ((angleDeg % 90) + 90) % 90;
+  var orth = m < 0.01 || m > 89.99;
+  var rotQ = (((Math.round(angleDeg / 90) % 4) + 4) % 4);
+  var angleRad = -angleDeg * Math.PI / 180;
+  var bc = (orth || !crop || (crop.w === 1 && crop.h === 1)) ? null : crop;
+  var tc = dispCropToTex(bc ? FULL_CROP : (crop || FULL_CROP), rotQ);
+  var A = (state.texW * tc.w) / (state.texH * tc.h);
+  var ca = Math.abs(Math.cos(angleRad)), sa = Math.abs(Math.sin(angleRad));
+  var bhx = A * ca + sa, bhy = A * sa + ca;
+  var cw = bc ? bc.w : 1, ch = bc ? bc.h : 1;
+  return (bhx * cw) / (bhy * ch);
+}
+
+// Render the ungraded base into the sample FBO and read it back (sRGB, 8-bit).
+function autoSample() {
+  if (!gl || !state.tex) return null;
+  ensureAutoFB();
+  var crop = state.cropping ? FULL_CROP : state.crop;
+  var ar = autoVisibleAspect(state.angleDeg, crop);
+  if (!isFinite(ar) || ar <= 0) ar = 1;
+  var w = ar >= 1 ? AUTO_MAX : Math.round(AUTO_MAX * ar);
+  var h = ar >= 1 ? Math.round(AUTO_MAX / ar) : AUTO_MAX;
+  w = Math.max(16, Math.min(AUTO_MAX, w));
+  h = Math.max(16, Math.min(AUTO_MAX, h));
+  computeFace(); computeDenoise(); computeSharpen();   // sample the same source the grade reads
+  gl.bindFramebuffer(gl.FRAMEBUFFER, autoFB.fbo);
+  gl.disable(gl.SCISSOR_TEST);
+  gl.disable(gl.BLEND);
+  gl.viewport(0, 0, w, h);
+  gl.clearColor(0, 0, 0, 1);
+  gl.clear(gl.COLOR_BUFFER_BIT);
+  drawQuad(w, h, state.angleDeg, -1, true, 1, [0, 0], crop, false);
+  gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, autoFB.px);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  return { px: autoFB.px, n: w * h, w: w, h: h };
+}
+
+function acClamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
+function acS2L(c) { return c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4); }
+function acL2S(c) {
+  c = Math.max(0, c);
+  return c <= 0.0031308 ? c * 12.92 : 1.055 * Math.pow(c, 1 / 2.4) - 0.055;
+}
+function acSstep(e0, e1, x) {
+  var t = acClamp((x - e0) / (e1 - e0), 0, 1);
+  return t * t * (3 - 2 * t);
+}
+// p-quantile of a 256-bin histogram, returned as a 0..1 code value.
+function acPct(bins, total, p) {
+  var want = total * p, acc = 0;
+  for (var i = 0; i < 256; i++) { acc += bins[i]; if (acc >= want) return i / 255; }
+  return 1;
+}
+// The shader's contrast step: mix(rgb, smoothstep(0,1,rgb), amount).
+function acContrast(v, amt) { return v + amt * (v * v * (3 - 2 * v) - v); }
+
+/* Where an sRGB level lands after exposure + the tone-region block. Both run
+ * BEFORE contrast in the shader, so solving contrast against the raw
+ * measurement would be solving against an image that no longer exists. Masks
+ * are keyed off the POST-exposure level, exactly as the shader keys them. */
+function acPredict(v, ev, p) {
+  var lin = acS2L(v) * Math.pow(2, ev);
+  var lg = acL2S(lin);
+  var f = Math.pow(2, p.highlights * acSstep(0.4, 0.95, lg) +
+                     p.shadows * (1 - acSstep(0.1, 0.6, lg)) +
+                     p.whites * 0.7 * acSstep(0.65, 1.0, lg));
+  var blMask = 1 - acSstep(0, 0.35, lg);
+  lin *= f;
+  if (p.blacks >= 0) lin += p.blacks * 0.08 * blMask * blMask;
+  else lin *= Math.pow(2, p.blacks * 1.5 * blMask);
+  return acL2S(lin);
+}
+
+/* ---- Auto Light ------------------------------------------------------------
+ * Targets are display-referred (sRGB code values), because that is the space
+ * the eye judges and the space the endpoints live in. Exposure is solved in
+ * linear light, because that is where the exposure uniform multiplies.
+ * The tone-region masks are recomputed here exactly as the shader builds them
+ * (its `lg` is luma^(1/2.2), which sRGB tracks closely enough at these levels),
+ * so each slider is solved against the gain it will actually deliver. */
+function acSolveLight(s) {
+  var px = s.px, n = s.n, i, j;
+  var bins = new Uint32Array(256);
+  for (i = 0, j = 0; i < n; i++, j += 4) {
+    bins[(px[j] * 0.2126 + px[j + 1] * 0.7152 + px[j + 2] * 0.0722) | 0]++;
+  }
+  var lo = acPct(bins, n, 0.0025), mid = acPct(bins, n, 0.5), hi = acPct(bins, n, 0.9975);
+  var p25 = acPct(bins, n, 0.25), p75 = acPct(bins, n, 0.75);
+
+  // Exposure: correct only when the median sits clearly OUTSIDE a normal band,
+  // and then only up to the near edge of that band. Chasing a single mid-grey
+  // anchor is the classic auto-exposure failure - it drags every deliberately
+  // high-key or low-key frame to the middle, which is exactly the wrong answer
+  // on the pictures worth keeping. Measured against a finished, hand-graded
+  // photo this band is the difference between "nothing to do" and -0.7 EV.
+  var EV_LO = 0.33, EV_HI = 0.62;
+  var ev = 0;
+  if (mid < EV_LO || mid > EV_HI) {
+    var midLin = acS2L(mid);
+    if (midLin > 1e-4) {
+      ev = acClamp(Math.log2(acS2L(mid < EV_LO ? EV_LO : EV_HI) / midLin) * 0.7, -1.5, 1.5);
+    }
+  }
+
+  var g = Math.pow(2, ev);
+  var hiLin = acS2L(hi) * g, loLin = acS2L(lo) * g;
+  var hiS = acL2S(hiLin), loS = acL2S(loLin);   // where the endpoints land after exposure
+
+  // Whites: f = exp2(whites * 0.7 * whMask). Brighten-only, and only a white
+  // point that is actually dull - one already near the top is either fine or
+  // clipping, and clipping is highlights' job.
+  var whMask = acSstep(0.65, 1.0, hiS);
+  var whites = 0;
+  if (hiS < 0.95 && whMask > 0.02 && hiLin > 1e-4) {
+    whites = acClamp(Math.log2(acS2L(0.97) / hiLin) / (0.7 * whMask) * 0.8, 0, 1);
+  }
+  // Blacks: negative branch is newLuma *= exp2(blacks * 1.5 * blMask). Deepen-
+  // only - lifting a black point that already sits near zero buys nothing, and
+  // crushed shadows are shadows' job. The 0.08 floor is the line between a
+  // milky black point (a defect) and a lifted one (a grade); a finished film
+  // look sits around 0.06 and must come back untouched.
+  var blMask = 1 - acSstep(0, 0.35, loS);
+  var blacks = 0;
+  if (loS > 0.08 && blMask > 0.02 && loLin > 1e-5) {
+    blacks = acClamp(Math.log2(acS2L(0.04) / loLin) / (1.5 * blMask) * 0.6, -1, 0);
+  }
+  // Clipped / crushed mass -> recovery. The 0.5% floor is the specular
+  // allowance: a sky with a sun in it is not a broken exposure.
+  var clipN = 0, crushN = 0;
+  for (i = 250; i < 256; i++) clipN += bins[i];
+  for (i = 0; i < 6; i++) crushN += bins[i];
+  var clipF = clipN / n, crushF = crushN / n;
+  var highlights = clipF > 0.005 ? -acClamp((clipF - 0.005) / 0.06, 0, 1) * 0.6 : 0;
+  var shadows = crushF > 0.005 ? acClamp((crushF - 0.005) / 0.08, 0, 1) * 0.6 : 0;
+
+  var sol = { exposure: ev, whites: whites, blacks: blacks,
+              highlights: highlights, shadows: shadows, contrast: 0 };
+
+  /* Contrast: solved on the INTER-QUARTILE spread, after pushing p25/p75
+   * through everything above. The quartiles are the midtones - the part
+   * contrast actually controls - and they ignore the outliers that make the
+   * 5/95 spread jumpy. The shader step mixes linearly toward smoothstep, so
+   * the spread after applying amount c is
+   *     spread + c * ((s75 - s25) - spread)
+   * which inverts in closed form. No search, no iteration.
+   * Measured band: finished photos sit near 0.28, this camera's neutral RAW
+   * render at 0.21. Outside the band, aim at the near edge, never the centre. */
+  var q25 = acPredict(p25, ev, sol), q75 = acPredict(p75, ev, sol);
+  var iqr = q75 - q25;
+  if (iqr > 0.01 && (iqr < 0.26 || iqr > 0.36)) {
+    var den = (acContrast(q75, 1) - acContrast(q25, 1)) - iqr;
+    if (Math.abs(den) > 1e-3) {
+      sol.contrast = acClamp(((iqr < 0.26 ? 0.28 : 0.32) - iqr) / den * 0.85, -1, 1);
+    }
+  }
+  return sol;
+}
+
+/* ---- Illuminant estimators --------------------------------------------------
+ * Three independent ways to guess what in the frame is supposed to be neutral,
+ * combined by taking the MEDIAN of the three answers. Each one has a failure
+ * mode the other two do not share, and a median survives any single one of them
+ * going wrong - which an average would not.
+ *
+ *   grey pixels     average the least-colourful mid-luma pixels. Strong when
+ *                   the frame contains something actually neutral; also the
+ *                   only estimator that can tell you it found nothing.
+ *   shades of gray  Minkowski norm (p=6) over channel values. Generalises
+ *                   grey-world (p=1) and white-patch (p=inf); p=6 is the robust
+ *                   middle. Fails when one big flat colour dominates the frame.
+ *   gray edge       Minkowski norm over per-channel GRADIENT magnitude
+ *                   (van de Weijer). Immune to exactly that failure - flat
+ *                   regions contribute no gradient at all, so a red wall filling
+ *                   half the frame simply does not vote. Fails on a frame with
+ *                   almost no edges.
+ *
+ * All three work in linear light: a gamma-encoded average over-weights the dark
+ * end and tilts the estimate. */
+
+// sRGB byte -> linear, table-driven (the sample buffer is 8-bit, so 256 entries
+// cover it exactly and the per-pixel pow disappears).
+var AC_S2L_LUT = (function () {
+  var t = new Float32Array(256);
+  for (var i = 0; i < 256; i++) t[i] = acS2L(i / 255);
+  return t;
+})();
+
+var acLinBuf = null;
+function acLinearize(s) {
+  var need = s.n * 3;
+  if (!acLinBuf || acLinBuf.length < need) acLinBuf = new Float32Array(need);
+  var px = s.px, L = acLinBuf;
+  for (var i = 0, j = 0, k = 0; i < s.n; i++, j += 4, k += 3) {
+    L[k] = AC_S2L_LUT[px[j]]; L[k + 1] = AC_S2L_LUT[px[j + 1]]; L[k + 2] = AC_S2L_LUT[px[j + 2]];
+  }
+  return L;
+}
+
+// Minkowski norm with p fixed at 6: v^6 = (v^3)^2, so no pow in the loop.
+function acShadesOfGray(lin, n) {
+  var s0 = 0, s1 = 0, s2 = 0, v;
+  for (var i = 0, k = 0; i < n; i++, k += 3) {
+    v = lin[k] * lin[k] * lin[k]; s0 += v * v;
+    v = lin[k + 1] * lin[k + 1] * lin[k + 1]; s1 += v * v;
+    v = lin[k + 2] * lin[k + 2] * lin[k + 2]; s2 += v * v;
+  }
+  return [Math.pow(s0 / n, 1 / 6), Math.pow(s1 / n, 1 / 6), Math.pow(s2 / n, 1 / 6)];
+}
+
+// Same norm over |grad| per channel. Central differences, one-sided at the
+// borders (the np.gradient convention), so the divisor is 2 inside and 1 at an edge.
+function acGrayEdge(lin, w, h) {
+  if (w < 3 || h < 3) return null;
+  var s = [0, 0, 0], n = w * h;
+  for (var y = 0; y < h; y++) {
+    var ym = y > 0 ? y - 1 : y, yp = y < h - 1 ? y + 1 : y, dy = yp - ym;
+    for (var x = 0; x < w; x++) {
+      var xm = x > 0 ? x - 1 : x, xp = x < w - 1 ? x + 1 : x, dx = xp - xm;
+      var rowY = y * w, rowM = ym * w, rowP = yp * w;
+      for (var c = 0; c < 3; c++) {
+        var gx = (lin[(rowY + xp) * 3 + c] - lin[(rowY + xm) * 3 + c]) / dx;
+        var gy = (lin[(rowP + x) * 3 + c] - lin[(rowM + x) * 3 + c]) / dy;
+        var m = Math.sqrt(gx * gx + gy * gy);
+        var m3 = m * m * m;
+        s[c] += m3 * m3;
+      }
+    }
+  }
+  return [Math.pow(s[0] / n, 1 / 6), Math.pow(s[1] / n, 1 / 6), Math.pow(s[2] / n, 1 / 6)];
+}
+
+// A reference that "should be neutral" -> the shader's two WB knobs.
+// Shader: r *= 2^(temp*0.6), b *= 2^(-temp*0.6), g *= 2^(-tint*0.4).
+// r and b meet at their geometric mean; tint then lands g on the same value.
+function acWbFromRef(rLin, gLin, bLin) {
+  var eps = 1e-7;
+  rLin = Math.max(rLin, eps); gLin = Math.max(gLin, eps); bLin = Math.max(bLin, eps);
+  return { temp: Math.log2(bLin / rLin) / 1.2,
+           tint: Math.log2(gLin / Math.sqrt(rLin * bLin)) / 0.4 };
+}
+function acEstUsable(e) { return !!e && e[0] > 1e-7 && e[1] > 1e-7 && e[2] > 1e-7; }
+function acMed3(a, b, c) { return Math.max(Math.min(a, b), Math.min(Math.max(a, b), c)); }
+
+/* ---- Auto Color ------------------------------------------------------------
+ * Median of the three estimators above, then vibrance from the frame's mean
+ * saturation. If the grey-pixel set is itself strongly coloured there is no
+ * neutral in frame (a sunset, a single-gel portrait) and the honest move is to
+ * refuse rather than bleach an intentional cast out of the picture. */
+function acSolveColor(s) {
+  var px = s.px, n = s.n, i, j, r, g, b, mx, mn;
+  var LO = 31, HI = 245;    // ~0.12 .. 0.96 sRGB: clipped whites and black noise carry no colour
+  var ch = new Uint32Array(101), midN = 0;
+  for (i = 0, j = 0; i < n; i++, j += 4) {
+    r = px[j]; g = px[j + 1]; b = px[j + 2];
+    mx = r > g ? (r > b ? r : b) : (g > b ? g : b);
+    if (mx < LO || mx > HI) continue;
+    mn = r < g ? (r < b ? r : b) : (g < b ? g : b);
+    ch[Math.round((mx - mn) / mx * 100)]++;
+    midN++;
+  }
+  if (midN < 200) return null;
+  var want = midN * 0.15, acc = 0, tIdx = 100;
+  for (i = 0; i <= 100; i++) { acc += ch[i]; if (acc >= want) { tIdx = i; break; } }
+  var thresh = tIdx / 100;
+
+  var sr = 0, sg = 0, sb = 0, sc = 0, cnt = 0, c;
+  for (i = 0, j = 0; i < n; i++, j += 4) {
+    r = px[j]; g = px[j + 1]; b = px[j + 2];
+    mx = r > g ? (r > b ? r : b) : (g > b ? g : b);
+    if (mx < LO || mx > HI) continue;
+    mn = r < g ? (r < b ? r : b) : (g < b ? g : b);
+    c = (mx - mn) / mx;
+    if (c > thresh) continue;
+    sr += acS2L(r / 255); sg += acS2L(g / 255); sb += acS2L(b / 255);
+    sc += c; cnt++;
+  }
+  if (cnt < 50) return null;
+  // Refuse only when the "grey" cluster is nowhere near grey. The line has to
+  // sit high: a strong cast over neutral content lands around 0.4 chroma and is
+  // exactly what this is for, while a scene with no neutral in it at all - a
+  // sunset, a single-gel portrait - runs 0.8 and up. Correcting the first and
+  // refusing the second is the whole judgement call.
+  if (sc / cnt > 0.55) return { bail: true };
+
+  var e1 = acWbFromRef(sr / cnt, sg / cnt, sb / cnt);
+  // Estimators 2 and 3 run on the whole frame, not just the grey candidates.
+  var lin = acLinearize(s);
+  var sog = acShadesOfGray(lin, n);
+  var ge = acGrayEdge(lin, s.w, s.h);
+  // A frame with no edges (or no light) gives that estimator nothing to say -
+  // fall back to the grey-pixel answer rather than letting a 0/0 ratio vote.
+  var e2 = acEstUsable(sog) ? acWbFromRef(sog[0], sog[1], sog[2]) : e1;
+  var e3 = acEstUsable(ge) ? acWbFromRef(ge[0], ge[1], ge[2]) : e1;
+
+  var temp = acClamp(acMed3(e1.temp, e2.temp, e3.temp) * 0.85, -1, 1);
+  var tint = acClamp(acMed3(e1.tint, e2.tint, e3.tint) * 0.85, -1, 1);
+
+  /* Vibrance: measure saturation on pixels carrying the WB fix (a cast inflates
+   * saturation) AND the Light group's current exposure + contrast. Contrast is
+   * per-channel in gamma space, so it raises chroma on its own - measure without
+   * it and pressing Auto Light then Auto Color over-saturates every time.
+   * The tone-region controls are deliberately skipped: they scale luma and leave
+   * the channel ratios alone, so their effect on saturation is only the mild
+   * second-order one through the sRGB curve, and they would cost a pow per pixel.
+   * This is why Auto Color reads the Light sliders - re-press it after Light. */
+  var P = state.params;
+  var kr = Math.pow(2, temp * 0.6), kb = Math.pow(2, -temp * 0.6), kg = Math.pow(2, -tint * 0.4);
+  var eg = Math.pow(2, P.exposure), ct = P.contrast;
+  var sSum = 0, sN = 0, R, G, B;
+  for (i = 0, j = 0; i < n; i++, j += 4) {
+    r = px[j]; g = px[j + 1]; b = px[j + 2];
+    mx = r > g ? (r > b ? r : b) : (g > b ? g : b);
+    if (mx < LO || mx > HI) continue;
+    R = acContrast(acClamp(acL2S(acS2L(r / 255) * kr * eg), 0, 1), ct);
+    G = acContrast(acClamp(acL2S(acS2L(g / 255) * kg * eg), 0, 1), ct);
+    B = acContrast(acClamp(acL2S(acS2L(b / 255) * kb * eg), 0, 1), ct);
+    mx = R > G ? (R > B ? R : B) : (G > B ? G : B);
+    mn = R < G ? (R < B ? R : B) : (G < B ? G : B);
+    if (mx > 1e-4) { sSum += (mx - mn) / mx; sN++; }
+  }
+  // Band edges measured off finished, hand-graded photos, which sit around 0.18
+  // mean HSV saturation - a target much above that has Auto adding vibrance to
+  // pictures that were already right.
+  var meanS = sN ? sSum / sN : 0, vib = 0;
+  if (meanS > 0.02) {
+    if (meanS < 0.14) vib = (0.14 / meanS - 1) / 1.2;
+    else if (meanS > 0.38) vib = (0.38 / meanS - 1) / 1.2;
+  }
+  vib = acClamp(vib * 0.8, -0.35, 0.35);
+
+  return { temperature: temp, tint: tint, vibrance: vib };
+}
+
+/* Write solved values onto the real sliders: snap to the slider's own step and
+ * range, refresh the readout, and go through captureAbBefore so the whole solve
+ * is one A/B step and one undo step. */
+function acApply(group, vals) {
+  if (abShowing) setAbShowing(false);
+  captureAbBefore();
+  if (!groupEnabled[group]) {   // solving into a hidden group would look like a no-op
+    groupEnabled[group] = true;
+    eyeSyncs.forEach(function (fn) { fn(); });
+  }
+  var changed = [];
+  Object.keys(vals).forEach(function (id) {
+    var si = sliderInputs[id];
+    if (!si) return;
+    var step = parseFloat(si.input.step) || 0.01;
+    var v = acClamp(vals[id], parseFloat(si.input.min), parseFloat(si.input.max));
+    v = +(Math.round(v / step) * step).toFixed(6);
+    si.input.value = v;
+    state.params[id] = v;
+    si.refresh();
+    if (v !== PARAM_DEF[id]) changed.push(PARAM_LABEL[id] + ' ' + si.fmt(v));
+  });
+  requestRender();
+  return changed;
+}
+
+var AUTO_GROUPS = {
+  Light: { solve: acSolveLight, title:
+    'Solves Exposure, Contrast, Whites, Blacks, Highlights and Shadows from the ' +
+    'image itself - robust percentiles measured on the ungraded base - and writes ' +
+    'them to the sliders. Contrast comes off the midtone spread, which is what a ' +
+    'flat RAW render is actually missing. Gamma is left alone.' },
+  Color: { solve: acSolveColor, title:
+    'Estimates the neutral point from the least colourful pixels and writes ' +
+    'Temperature and Tint; Vibrance only moves when overall saturation sits ' +
+    'outside a normal band. Refuses when the scene has no neutral to lock onto. ' +
+    'Reads the current Light settings, so re-press it after running Auto Light.' }
+};
+
+function makeGroupAuto(groupName) {
+  var spec = AUTO_GROUPS[groupName];
+  var b = document.createElement('button');
+  b.type = 'button';
+  b.className = 'grpauto';
+  b.textContent = 'AUTO';
+  b.title = spec.title;
+  b.addEventListener('click', function (e) {
+    e.preventDefault();
+    e.stopPropagation();   // do not toggle the <details> open state
+    if (!state.tex) return;
+    var s = autoSample();
+    if (!s) { toast('Auto ' + groupName + ': nothing to measure.'); return; }
+    var vals = spec.solve(s);
+    if (!vals) { toast('Auto ' + groupName + ': not enough usable pixels to measure.'); return; }
+    if (vals.bail) {
+      toast('Auto Color: no neutral reference in frame - the cast looks intentional. ' +
+            'Sliders left untouched.');
+      return;
+    }
+    var changed = acApply(groupName, vals);
+    toast(changed.length
+      ? 'Auto ' + groupName + ': ' + changed.join(', ')
+      : 'Auto ' + groupName + ': already balanced, nothing to change.');
+  });
+  return b;
+}
+
+/* ============================================================
  * UI helpers
  * ============================================================ */
 var toastTimer = 0;
@@ -3350,10 +3824,12 @@ var sliderInputs = {};
 // Per-group bypass (eye toggle). A disabled group renders its params at default.
 var groupEnabled = { Light: true, Color: true, Effects: true, Denoise: true, Grain: true, LUT: true, Face: true };
 var eyeSyncs = [];        // per-eye refresh fns, so undo/redo can resync every eye button
-var PARAM_GROUP = {}, PARAM_DEF = {};
+var PARAM_GROUP = {}, PARAM_DEF = {}, PARAM_LABEL = {};
 var groupTitleEls = {};   // group name -> its title <span> (for the A/B "changed" marker)
 SLIDER_GROUPS.forEach(function (g) {
-  g.items.forEach(function (it) { PARAM_GROUP[it.id] = g.group; PARAM_DEF[it.id] = it.def; });
+  g.items.forEach(function (it) {
+    PARAM_GROUP[it.id] = g.group; PARAM_DEF[it.id] = it.def; PARAM_LABEL[it.id] = it.label;
+  });
 });
 
 var EYE_ON = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>';
@@ -3443,6 +3919,7 @@ function buildSliders() {
     stxt.textContent = grp.group;
     groupTitleEls[grp.group] = stxt;
     h.appendChild(stxt);
+    if (AUTO_GROUPS[grp.group]) h.appendChild(makeGroupAuto(grp.group));
     h.appendChild(makeGroupReset(grp.group, function () {
       if (typeof captureAbBefore === 'function') captureAbBefore();
       grp.items.forEach(function (item) {

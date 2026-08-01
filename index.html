@@ -1464,6 +1464,12 @@ var state = {
   texByRes: { half: null, full: null }, // decoded base textures cached per resolution
   texGen: 0,           // bumped per image load so stale cached textures are ignored
 
+  /* Pivot the Contrast control turns around, in gamma space. Measured from each
+   * image's own midtone when it loads (see measureContrastPivot); 0.5 until then,
+   * which is the old fixed behaviour. Not a user control - it only makes the
+   * slider mean the same thing on a dark frame as on a bright one. */
+  cPivot: 0.5,
+
   angleDeg: 0,         // free rotation in degrees, clockwise on screen
   zoom: 1,             // 1 = fit, >1 zoomed in
   pan: [0, 0],         // clip-space offset, applied after zoom
@@ -1584,6 +1590,7 @@ var FRAG_SRC = [
   'uniform sampler2D u_image;',
   'uniform float u_exposure, u_contrast, u_highlights, u_shadows, u_whites, u_blacks;',
   'uniform float u_temperature, u_tint, u_vibrance, u_saturation, u_gamma, u_vignette;',
+  'uniform float u_cpivot;',
   'uniform float u_grain, u_grainSize;',
   'uniform int u_fromSrgb;', // 1 = input is an sRGB scene buffer (post pass); re-linearize before grading
   'uniform int u_toneMode;', // 0 = hard clip (linear), 1 = highlight rolloff, 2 = ACES filmic
@@ -1735,21 +1742,31 @@ var FRAG_SRC = [
   '  // 4. Linear to sRGB (exact piecewise curve)',
   '  rgb = linToSrgb(rgb);',
   '',
-  // 5. Contrast: S-curve around 0.5 in gamma space, built as a power on each
-  //    side of the pivot. The slope AT the pivot is exactly k, so the control
-  //    has no ceiling - the old mix-toward-smoothstep topped out at 1.5x midtone
-  //    slope at the maximum setting while halving the slope at 0.1 and 0.9,
-  //    which is why maxed contrast still read flat and killed the ends.
-  //    k = 3^contrast: exact identity at 0, 3x midtone slope at +1, 1/3 at -1.
-  //    At matched midtone slope this shape is also GENTLER on the shadows than
-  //    smoothstep was (0.67 vs 0.54 at level 0.1), so the extra punch does not
-  //    come out of shadow detail.
+  // 5. Contrast: S-curve in gamma space, built as a power on each side of a
+  //    pivot. 0, the pivot and 1 are all fixed points, and the slope AT the
+  //    pivot is exactly k, so the control has no ceiling - the old mix-toward-
+  //    smoothstep topped out at 1.5x midtone slope at the maximum setting while
+  //    halving the slope at 0.1 and 0.9, which is why maxed contrast still read
+  //    flat and killed the ends. k = 3^contrast: exact identity at 0, 3x pivot
+  //    slope at +1, 1/3 at -1.
+  //
+  //    The pivot is u_cpivot, set per image from its own midtone rather than
+  //    nailed to 0.5. That single number decides which way "more contrast"
+  //    moves the subject: with a fixed 0.5 pivot, everything below the middle
+  //    goes DOWN, so on a dark frame the only way to reach a normal-looking
+  //    picture is exposure - which then blows the highlights, which is exactly
+  //    the failure that kept getting reported. Anchoring on the frame's own
+  //    midtone makes contrast lift the subject and deepen only the true
+  //    shadows, which is what the manual "-exposure, +contrast" fix does by
+  //    hand, and it is also the only way both quartiles can rise at once the
+  //    way they do in a hand grade.
   '  if (u_contrast != 0.0) {',
   '    vec3 k = vec3(pow(3.0, u_contrast));',
+  '    float pv = clamp(u_cpivot, 0.05, 0.95);',
   '    vec3 c0 = clamp(rgb, 0.0, 1.0);',
-  '    vec3 lo = 0.5 * pow(max(c0 * 2.0, vec3(1e-6)), k);',
-  '    vec3 hi = 1.0 - 0.5 * pow(max((1.0 - c0) * 2.0, vec3(1e-6)), k);',
-  '    rgb = mix(lo, hi, step(vec3(0.5), c0));',
+  '    vec3 lo = pv * pow(max(c0 / pv, vec3(1e-6)), k);',
+  '    vec3 hi = 1.0 - (1.0 - pv) * pow(max((1.0 - c0) / (1.0 - pv), vec3(1e-6)), k);',
+  '    rgb = mix(lo, hi, step(vec3(pv), c0));',
   '  }',
   '',
   '  // 6. Saturation, then vibrance (boosts low-sat pixels more)',
@@ -2299,6 +2316,7 @@ function initGL() {
   uni.image = gl.getUniformLocation(prog, 'u_image');
   uni.fromSrgb = gl.getUniformLocation(prog, 'u_fromSrgb');
   uni.toneMode = gl.getUniformLocation(prog, 'u_toneMode');
+  uni.cpivot = gl.getUniformLocation(prog, 'u_cpivot');
   uni.lut = [
     {
       s3d: gl.getUniformLocation(prog, 'u_lut0_3d'),
@@ -2826,6 +2844,7 @@ function drawQuad(vpW, vpH, angleDeg, flipY, letterbox, zoom, pan, crop, effects
   // Tone curve only on the graded pass; the ungraded base blit (effects=false)
   // stays hard-clip so the post pass applies the curve once on the composite.
   gl.uniform1i(uni.toneMode, effects ? toneModeVal() : 0);
+  gl.uniform1f(uni.cpivot, state.cPivot);
   for (var i = 0; i < PARAM_IDS.length; i++) {
     var pid = PARAM_IDS[i];
     // effects=false renders the ungraded base (only linear->sRGB) into the scene
@@ -3007,6 +3026,7 @@ function drawEffectsPost(vpW, vpH, scenePassFlipY, srcTex) {
   gl.bindTexture(gl.TEXTURE_2D, srcTex);
   gl.uniform1i(uni.fromSrgb, 1); // scene holds sRGB; re-linearize before grading
   gl.uniform1i(uni.toneMode, toneModeVal()); // final composite grade: apply the tone curve
+  gl.uniform1f(uni.cpivot, state.cPivot);
   for (var i = 0; i < PARAM_IDS.length; i++) {
     var pid = PARAM_IDS[i];
     var grp = PARAM_GROUP[pid];
@@ -3372,13 +3392,16 @@ function acPct(bins, total, p) {
   for (var i = 0; i < 256; i++) { acc += bins[i]; if (acc >= want) return i / 255; }
   return 1;
 }
-// The shader's contrast step, kept bit-for-bit in step with it: a power curve
-// on each side of the 0.5 pivot, k = 3^amount. Slope at the pivot is exactly k.
+// The shader's contrast step, kept bit-for-bit in step with it: a power curve on
+// each side of state.cPivot, k = 3^amount. Slope at the pivot is exactly k, and
+// 0, the pivot and 1 are all fixed points.
 function acContrast(v, amt) {
   if (!amt) return v;
   v = v < 0 ? 0 : (v > 1 ? 1 : v);
   var k = Math.pow(3, amt);
-  return v < 0.5 ? 0.5 * Math.pow(v * 2, k) : 1 - 0.5 * Math.pow((1 - v) * 2, k);
+  var p = acClamp(state.cPivot, 0.05, 0.95);
+  return v < p ? p * Math.pow(v / p, k)
+               : 1 - (1 - p) * Math.pow((1 - v) / (1 - p), k);
 }
 // Inverse of it. Monotonic for any amount in [-1,1] (the slope is 1 + amt*(s'-1)
 // with s' in [0,1.5], so it never turns over), which makes bisection safe;
@@ -3417,6 +3440,39 @@ function acPredict(v, ev, p) {
  * The tone-region masks are recomputed here exactly as the shader builds them
  * (its `lg` is luma^(1/2.2), which sRGB tracks closely enough at these levels),
  * so each slider is solved against the gain it will actually deliver. */
+/* Where the Contrast control should turn, for THIS picture.
+ *
+ * A pivot fixed at 0.5 quietly decides that "more contrast" means "darker" for
+ * every frame whose subject sits below the middle - which is most of them. That
+ * left exposure as the only way to reach a normal-looking picture, and exposure
+ * moves the highlights too, so the frame blew out and the stop had to come back
+ * off. Round and round. Anchoring the pivot on the frame's own midtone breaks
+ * the loop: contrast lifts what is above the subject and deepens only what is
+ * genuinely below it.
+ *
+ * Measured on the mass, not the percentiles: pixels sitting ON black or white
+ * are excluded, because a large deliberate black region would otherwise drag the
+ * pivot down and undo the whole point. Clamped well inside the range so a frame
+ * that is almost all sky or almost all shadow cannot produce a degenerate curve.
+ */
+function measureContrastPivot() {
+  var s = autoSample();
+  if (!s) { state.cPivot = 0.5; return; }
+  var px = s.px, n = s.n, bins = new Uint32Array(256), i, j;
+  for (i = 0, j = 0; i < n; i++, j += 4) {
+    bins[(px[j] * 0.2126 + px[j + 1] * 0.7152 + px[j + 2] * 0.0722) | 0]++;
+  }
+  var keep = 0;
+  for (i = 7; i < 249; i++) keep += bins[i];
+  if (keep < n * 0.2) { state.cPivot = 0.5; return; }
+  var half = keep * 0.5, acc = 0, med = 0.5;
+  for (i = 7; i < 249; i++) {
+    acc += bins[i];
+    if (acc >= half) { med = i / 255; break; }
+  }
+  state.cPivot = acClamp(med, 0.28, 0.62);
+}
+
 function acSolveLight(s) {
   var px = s.px, n = s.n, i, j;
   var bins = new Uint32Array(256);
@@ -3448,6 +3504,26 @@ function acSolveLight(s) {
       ev = acClamp(Math.log2(acS2L(mid < EV_LO ? EV_LO : EV_HI) / midLin) * 0.85, -1.5, 1.5);
     }
   }
+
+  /* Only LIFT a frame that has a bright end to lift. A dark median means one of
+   * two completely different things - underexposed, or deliberately dark - and
+   * the median cannot tell them apart. The white point can: a frame whose
+   * brightest quarter-percent never reaches white simply has no bright content in
+   * it, and pushing its midtones up does not reveal a highlight, it invents one.
+   *
+   * Every frame the photographer marked as over-lifted has this shape. Measured:
+   *
+   *   frame     median  p9975   auto asked   photographer said
+   *   00979     0.314   0.706   +0.90        -0.64, or leave it and add contrast
+   *   00877     0.396   0.749   +0.84        leave it, add contrast
+   *   flat RAW  0.490   0.988   +0.31        correct, that one wanted the lift
+   *
+   * The first two are low-key pictures. The third is a genuinely flat render of a
+   * scene that does contain highlights, and it is the only one that should move.
+   * p9975 separates them cleanly, and nothing derived from the midtones does.
+   * Pulls DOWN are never gated - a frame can always be too bright. */
+  var liftOK = acSstep(0.78, 0.95, hi);
+  if (ev > 0) ev *= liftOK;
 
   /* Highlight ceiling. The median is a brightness proxy only while the histogram
    * has a single hump. On a full-range frame - a lit subject in a dark room, a
@@ -3543,8 +3619,12 @@ function acSolveLight(s) {
       if (acContrast(acClamp(acPredict(mid, em, sol), 0, 1), sol.contrast) < wantMed) elo = em;
       else ehi = em;
     }
-    ev = acClamp((elo + ehi) * 0.5, -1.5, 1.5);
-    if (ev > hiCeil) ev = acClamp(hiCeil, -1.5, 1.5);
+    var evNew = acClamp((elo + ehi) * 0.5, -1.5, 1.5);
+    // Same gate as the first pass: this step may always pull down, but it may
+    // only push up as far as the frame's own white point earns.
+    if (evNew > ev) evNew = ev + (evNew - ev) * liftOK;
+    if (evNew > hiCeil) evNew = acClamp(hiCeil, -1.5, 1.5);
+    ev = evNew;
     sol.exposure = ev;
   }
 
@@ -4790,6 +4870,7 @@ async function loadFile(file) {
     thumbImg.style.display = 'none';
     dropzone.classList.remove('hidden');
   }
+  if (ok && typeof measureContrastPivot === 'function') measureContrastPivot();
   } finally {
     state.busy = false;
   }

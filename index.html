@@ -3425,6 +3425,7 @@ function acSolveLight(s) {
   }
   var lo = acPct(bins, n, 0.0025), mid = acPct(bins, n, 0.5), hi = acPct(bins, n, 0.9975);
   var p25 = acPct(bins, n, 0.25), p75 = acPct(bins, n, 0.75);
+  var hiA = acPct(bins, n, 0.95);
 
   /* Exposure: correct only when the median sits clearly OUTSIDE a normal band,
    * and then only up to the near edge. Chasing a single mid-grey anchor is the
@@ -3448,7 +3449,50 @@ function acSolveLight(s) {
     }
   }
 
+  /* Highlight ceiling. The median is a brightness proxy only while the histogram
+   * has a single hump. On a full-range frame - a lit subject in a dark room, a
+   * window in shot, a flash-lit group against night - it lands in the VALLEY
+   * between the two humps and reads as "too dark" no matter how blown the bright
+   * end already is. Measured on two wedding frames: 8.1% and 3.2% of the frame
+   * sitting ON the clip point, medians 0.482 and 0.412, and the band asked for
+   * +0.55 and +1.15 EV on top of that. That is the "auto overexposes" report, and
+   * no amount of highlight recovery afterwards can undo it - the data is gone.
+   *
+   * So cap the stop by what the bright end can still take, and let the cap pull
+   * DOWN when the frame is already over.
+   *
+   * The anchor is p95 against 0.76, and both numbers are measured rather than
+   * picked: the hand-graded reference sits at p95 = 0.741, so that is where a
+   * finished bright end actually lands, and 0.76 leaves it a little room. p95 is
+   * a far better exposure anchor than the median - a frame the photographer says
+   * needs NO exposure change measures p95 0.741, identical to the reference,
+   * while its median reads 0.396 against the reference's 0.624. The whole gap
+   * between those two frames is midtone placement, not stop. Anchoring on the
+   * bright end says that out loud: exposure is set by the highlights, and where
+   * the midtones sit inside it is contrast's job, not exposure's.
+   *
+   * Ceiling only, deliberately no floor. A floor would force a lift on any frame
+   * whose bright end is dark - which is the definition of a low-key picture, and
+   * dragging those to the middle is the classic auto-exposure failure this whole
+   * block exists to avoid. */
+  var hiCeil = Math.log2(acS2L(0.76) / Math.max(acS2L(hiA), 1e-4));
+  if (ev > hiCeil) ev = acClamp(hiCeil, -1.5, 1.5);
+
   var sol = { exposure: ev, whites: 0, blacks: 0, contrast: 0, highlights: 0, shadows: 0 };
+
+  /* Did the CAPTURE already run out of room at either end? Measured on the input
+   * histogram, deliberately - not on the solved chain. This is a property of the
+   * scene, not of the answer, and reading it off the chain made it brittle: a
+   * ninth of a stop of exposure pull was enough to walk the whole frame under the
+   * 250 threshold and flip the verdict.
+   * Span cannot stand in for it. Measured, a wide-range frame that clips 8% and a
+   * finished hand-graded photo that clips none both span 0.929 - it is the mass
+   * piled up ON the endpoints that says the range was more than the sensor held,
+   * and only that mass justifies reading a wide spread as range. */
+  var clipIn = 0, crushIn = 0;
+  for (i = 250; i < 256; i++) clipIn += bins[i];
+  for (i = 0; i <= 5; i++) crushIn += bins[i];
+  var wideDR = clipIn / n > 0.005 || crushIn / n > 0.005;
 
   /* Contrast, solved BEFORE the endpoints. It runs last in the shader and moves
    * the ends hard, so anything solved before it gets overshot - see the endpoint
@@ -3461,10 +3505,19 @@ function acSolveLight(s) {
    * linear in it (the curve is a power, not a mix), so it is bisected rather
    * than inverted in closed form - 24 halvings, still nothing measurable.
    * Measured band: finished photos sit near 0.28, this camera's neutral RAW
-   * render at 0.21. Inside the band, leave it alone. */
+   * render at 0.21. Inside the band, leave it alone.
+   *
+   * The REDUCTION branch is gated on the frame not already running out of room.
+   * A wide inter-quartile spread has two completely different causes: midtones
+   * genuinely too steep, or a scene that simply covers a lot of range. Only the
+   * first one is contrast's problem. Measured on the same two wedding frames,
+   * spreads of 0.427 and 0.396 with both ends clipping earned contrast -0.57 and
+   * -0.32 - flattening a picture whose real complaint was dynamic range, which is
+   * what highlights and shadows are for a few lines below. Wide AND clipping
+   * means leave the slope alone. */
   var q25 = acPredict(p25, ev, sol), q75 = acPredict(p75, ev, sol);
   var iqr = q75 - q25;
-  if (iqr > 0.01 && (iqr < 0.26 || iqr > 0.36)) {
+  if (iqr > 0.01 && (iqr < 0.26 || (iqr > 0.36 && !wideDR))) {
     var tgt = iqr < 0.26 ? 0.30 : 0.32;
     var clo = -1, chi = 1, cm;
     for (var t = 0; t < 24; t++) {
@@ -3491,6 +3544,7 @@ function acSolveLight(s) {
       else ehi = em;
     }
     ev = acClamp((elo + ehi) * 0.5, -1.5, 1.5);
+    if (ev > hiCeil) ev = acClamp(hiCeil, -1.5, 1.5);
     sol.exposure = ev;
   }
 
@@ -3541,22 +3595,24 @@ function acSolveLight(s) {
 }
 
 /* ---- Illuminant estimators --------------------------------------------------
- * Three independent ways to guess what in the frame is supposed to be neutral,
- * combined by taking the MEDIAN of the three answers. Each one has a failure
- * mode the other two do not share, and a median survives any single one of them
- * going wrong - which an average would not.
+ * Three ways to guess what in the frame is supposed to be neutral. They are NOT
+ * equal partners - see the combination step in acSolveColor for why the grey
+ * cluster leads and the other two only take over under a real cast.
  *
  *   grey pixels     average the least-colourful mid-luma pixels. Strong when
- *                   the frame contains something actually neutral; also the
- *                   only estimator that can tell you it found nothing.
+ *                   the frame contains something actually neutral; the only
+ *                   estimator that can tell you it found nothing, and the only
+ *                   one whose answer rests on evidence rather than assumption.
  *   shades of gray  Minkowski norm (p=6) over channel values. Generalises
  *                   grey-world (p=1) and white-patch (p=inf); p=6 is the robust
- *                   middle. Fails when one big flat colour dominates the frame.
+ *                   middle. Fails when one big colour dominates the frame.
  *   gray edge       Minkowski norm over per-channel GRADIENT magnitude
- *                   (van de Weijer). Immune to exactly that failure - flat
- *                   regions contribute no gradient at all, so a red wall filling
- *                   half the frame simply does not vote. Fails on a frame with
- *                   almost no edges.
+ *                   (van de Weijer). Immune to a big FLAT colour - flat regions
+ *                   contribute no gradient, so a painted red wall does not vote.
+ *                   That immunity is narrower than it looks: wood, fabric,
+ *                   foliage and brick are textured, and textured dominant colour
+ *                   defeats it exactly the way it defeats shades-of-gray. Also
+ *                   fails on a frame with almost no edges.
  *
  * All three work in linear light: a gamma-encoded average over-weights the dark
  * end and tilts the estimate. */
@@ -3643,9 +3699,28 @@ function acSolveColor(s) {
     midN++;
   }
   if (midN < 200) return null;
-  var want = midN * 0.15, acc = 0, tIdx = 100;
-  for (i = 0; i <= 100; i++) { acc += ch[i]; if (acc >= want) { tIdx = i; break; } }
-  var thresh = tIdx / 100;
+
+  /* Where to draw the line for "grey enough". Prefer an ABSOLUTE cut - a pixel at
+   * 10% chroma reads near-neutral in any frame, and taking only those keeps the
+   * cluster honest about what it actually found.
+   * The relative 15% quantile this replaces has no floor: it hands back a cluster
+   * whether or not the frame holds anything neutral, and on a frame that is
+   * mostly one warm surface it dutifully hands back that surface. Measured on a
+   * wood-and-paper synthetic, the quantile landed at 0.489 chroma and the "grey"
+   * cluster averaged 0.337 - wood, called grey, then used to white balance.
+   * Fall back to the quantile when too little of the frame clears the absolute
+   * bar. Under a genuine cast nothing does, and that is exactly the case the
+   * whole-frame estimators exist to carry. */
+  var absN = 0;
+  for (i = 0; i <= 10; i++) absN += ch[i];
+  var thresh;
+  if (absN >= 50 && absN / midN >= 0.02) {
+    thresh = 0.10;
+  } else {
+    var want = midN * 0.15, acc = 0, tIdx = 100;
+    for (i = 0; i <= 100; i++) { acc += ch[i]; if (acc >= want) { tIdx = i; break; } }
+    thresh = tIdx / 100;
+  }
 
   var sr = 0, sg = 0, sb = 0, sc = 0, cnt = 0, c;
   for (i = 0, j = 0; i < n; i++, j += 4) {
@@ -3676,8 +3751,28 @@ function acSolveColor(s) {
   var e2 = acEstUsable(sog) ? acWbFromRef(sog[0], sog[1], sog[2]) : e1;
   var e3 = acEstUsable(ge) ? acWbFromRef(ge[0], ge[1], ge[2]) : e1;
 
-  var temp = acClamp(acMed3(e1.temp, e2.temp, e3.temp) * 0.85, -1, 1);
-  var tint = acClamp(acMed3(e1.tint, e2.tint, e3.tint) * 0.85, -1, 1);
+  /* Combine. A plain median of three is only robust while the three errors are
+   * INDEPENDENT, and these are not: shades-of-gray and gray-edge both assume the
+   * frame averages to neutral, so a big real colour breaks them together and in
+   * the same direction. Two correlated wrong votes then outvote the one estimator
+   * that had actual evidence, and the median reliably picks the failure.
+   *
+   * Measured on a warm kitchen frame - wood worktop over half the picture, white
+   * paper and glass in it - the grey cluster read tint -0.09 off the genuinely
+   * neutral paper while the other two read -0.49 and -0.51 off the wood. The
+   * median took -0.49 and pushed the whole picture green. Gray-edge was supposed
+   * to be the guard here, but it is only immune to a FLAT dominant colour: wood
+   * grain, fabric, foliage and brick are textured, so they vote at full strength.
+   *
+   * So anchor on the grey cluster while it is convincingly neutral, and hand over
+   * to the median only as the cluster itself turns chromatic - which is the case
+   * the whole-frame estimators exist for, a real cast where even the least
+   * colourful pixels are tinted. Cluster chroma is the confidence: measured 0.02
+   * to 0.09 on frames with a true neutral in them, around 0.4 under a strong
+   * cast, 0.8 and up with no neutral at all (already refused above). */
+  var conf = 1 - acSstep(0.15, 0.45, sc / cnt);
+  var temp = acClamp((e1.temp * conf + acMed3(e1.temp, e2.temp, e3.temp) * (1 - conf)) * 0.85, -1, 1);
+  var tint = acClamp((e1.tint * conf + acMed3(e1.tint, e2.tint, e3.tint) * (1 - conf)) * 0.85, -1, 1);
 
   /* Vibrance: measure saturation on pixels carrying the WB fix (a cast inflates
    * saturation) AND the Light group's current exposure + contrast. Contrast is

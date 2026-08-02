@@ -4081,11 +4081,42 @@ function acContrastInv(target, amt) {
   return (lo + hi) * 0.5;
 }
 
-/* Where an sRGB level lands after exposure + the tone-region block. Both run
- * BEFORE contrast in the shader, so solving contrast against the raw
- * measurement would be solving against an image that no longer exists. Masks
- * are keyed off the POST-exposure level, exactly as the shader keys them. */
-function acPredict(v, ev, p) {
+/* The shader's tone curve (step 3b), in linear light and before the sRGB
+ * encode. The solver used to skip it, which made every clip count pessimistic
+ * under the default rolloff and simply wrong under ACES: a linear 2.0 was read
+ * as blown white when the shader would have rolled it to 0.958, so highlight
+ * recovery was being applied to highlights the pipeline had already saved. */
+function acTone(lin) {
+  var m = toneModeVal();
+  if (m === 2) {
+    return acClamp((lin * (2.51 * lin + 0.03)) / (lin * (2.43 * lin + 0.59) + 0.14), 0, 1);
+  }
+  if (m === 1) {
+    var k = 0.75, over = lin > k ? lin - k : 0;
+    return (lin < k ? lin : k) + (1 - k) * (over / (over + (1 - k)));
+  }
+  return lin;
+}
+/* Inverse of it, so an endpoint target expressed in display terms can be turned
+ * back into the linear value whites and blacks actually multiply. Bisected for
+ * both modes rather than inverted in closed form for one: monotonic, thirty
+ * halvings, and it runs twice per solve. */
+function acToneInv(y) {
+  if (!toneModeVal()) return y;
+  if (y >= 1) return 16;
+  var lo = 0, hi = 16, mid;
+  for (var i = 0; i < 30; i++) {
+    mid = (lo + hi) * 0.5;
+    if (acTone(mid) < y) lo = mid; else hi = mid;
+  }
+  return (lo + hi) * 0.5;
+}
+
+/* Where an sRGB level lands after exposure + the tone-region block, as LINEAR
+ * light and before the tone curve - which is the value whites and blacks scale,
+ * so it is the one their solve has to invert against. Masks are keyed off the
+ * post-exposure level, exactly as the shader keys them. */
+function acPredictLin(v, ev, p) {
   var lin = acS2L(v) * Math.pow(2, ev);
   var lg = acL2S(lin);
   var f = Math.pow(2, p.highlights * acSstep(0.4, 0.95, lg) +
@@ -4095,8 +4126,12 @@ function acPredict(v, ev, p) {
   lin *= f;
   if (p.blacks >= 0) lin += p.blacks * 0.08 * blMask * blMask;
   else lin *= Math.pow(2, p.blacks * 1.5 * blMask);
-  return acL2S(lin);
+  return lin;
 }
+/* The same level as the eye finally sees it before contrast: tone curve, then
+ * the sRGB encode. Everything that compares against a display target - the
+ * quartile spread, the median band, the clip thresholds - wants this one. */
+function acPredict(v, ev, p) { return acL2S(acTone(acPredictLin(v, ev, p))); }
 
 /* ---- Auto Light ------------------------------------------------------------
  * Targets are display-referred (sRGB code values), because that is the space
@@ -4136,6 +4171,47 @@ function measureContrastPivot() {
     if (acc >= half) { med = i / 255; break; }
   }
   state.cPivot = acClamp(med, 0.28, 0.62);
+}
+
+/* How much of the frame ends up ON white or ON black, counted PER CHANNEL over
+ * the sampled pixels rather than on the luma histogram.
+ *
+ * Luma hides the failure that matters. A red flower, a skin highlight, a blue
+ * sky - the channel that blows goes first and on its own, and luma weights it
+ * 0.21, 0.72 or 0.07, so a fully blown red reads as luma 0.21 and the histogram
+ * says the frame is nowhere near white. That is the case where highlight
+ * recovery is most needed and it was the one case the solver could not see.
+ *
+ * Per pixel rather than per bin because the chain is no longer separable once
+ * channels are treated individually: the tone-region gain is keyed on the
+ * pixel's LUMA, and everything after it runs per channel, so a bin of "luma
+ * 137" contains pixels whose brightest channel ranges from 137 to 255. Only the
+ * brightest channel is followed - the rest cannot clip before it does, and the
+ * whole chain past step 3 is monotonic per channel, so the max survives it. */
+function acClipCount(s, ev, p) {
+  var px = s.px, n = s.n, clip = 0, crush = 0;
+  var kEv = Math.pow(2, ev);
+  var CLIP = 250 / 255, CRUSH = 5 / 255;
+  for (var i = 0, j = 0; i < n; i++, j += 4) {
+    var r = AC_S2L_LUT[px[j]] * kEv;
+    var g = AC_S2L_LUT[px[j + 1]] * kEv;
+    var b = AC_S2L_LUT[px[j + 2]] * kEv;
+    var luma = r * 0.2126 + g * 0.7152 + b * 0.0722;
+    if (luma < 1e-6) { crush++; continue; }
+    var lg = acL2S(luma);
+    var f = Math.pow(2, p.highlights * acSstep(0.4, 0.95, lg) +
+                        p.shadows * (1 - acSstep(0.1, 0.6, lg)) +
+                        p.whites * acSstep(0.5, 1.0, lg));
+    var blMask = 1 - acSstep(0, 0.35, lg);
+    var nl = luma * f;
+    if (p.blacks >= 0) nl += p.blacks * 0.08 * blMask * blMask;
+    else nl *= Math.pow(2, p.blacks * 1.5 * blMask);
+    var mx = r > g ? (r > b ? r : b) : (g > b ? g : b);
+    var out = acContrast(acClamp(acL2S(acTone(mx * (nl / luma))), 0, 1), p.contrast);
+    if (out >= CLIP) clip++;
+    else if (out <= CRUSH) crush++;
+  }
+  return { clip: clip / n, crush: crush / n };
 }
 
 function acSolveLight(s) {
@@ -4293,48 +4369,56 @@ function acSolveLight(s) {
     sol.exposure = ev;
   }
 
-  /* Clipped / crushed mass -> recovery, counted AFTER contrast rather than on
-   * the input. Contrast is what pushes highlights over the edge, so reading the
-   * input under-reports exactly when it matters - and the leftover blown
-   * highlights are what forces a manual exposure pull afterwards. Mapping the
-   * 256 bin centres through the chain is enough: the transfer is monotonic, so
-   * no bin can overtake another and the counts stay exact.
+  /* Recovery and endpoints, solved together over two passes.
+   *
+   * They depend on each other in a circle: how much highlight recovery a frame
+   * needs depends on how much of it is clipping, and whites moves the top AFTER
+   * that count is taken. Solving once left the count blind to the last thing the
+   * solver does to the bright end. One refinement closes it - the second pass
+   * counts what the finished chain actually produces, and re-aims the endpoints
+   * at the recovery that count earns. Damped on both sides, so it settles rather
+   * than trading the two controls back and forth.
+   *
    * The 0.5% floor is the specular allowance - a sky with a sun in it is not a
    * broken exposure. */
-  var clipN = 0, crushN = 0;
-  for (i = 0; i < 256; i++) {
-    if (!bins[i]) continue;
-    var vOut = acContrast(acClamp(acPredict(i / 255, ev, sol), 0, 1), sol.contrast);
-    if (vOut >= 250 / 255) clipN += bins[i];
-    else if (vOut <= 5 / 255) crushN += bins[i];
-  }
-  var clipF = clipN / n, crushF = crushN / n;
-  sol.highlights = clipF > 0.005 ? -acClamp((clipF - 0.005) / 0.06, 0, 1) * 0.6 : 0;
-  sol.shadows = crushF > 0.005 ? acClamp((crushF - 0.005) / 0.08, 0, 1) * 0.6 : 0;
+  var hiS, loS, hiLin, loLin, whMask, blMask, tHi, tLo, cc;
+  for (var pass = 0; pass < 2; pass++) {
+    cc = acClipCount(s, ev, sol);
+    sol.highlights = cc.clip > 0.005 ? -acClamp((cc.clip - 0.005) / 0.06, 0, 1) * 0.6 : 0;
+    sol.shadows = cc.crush > 0.005 ? acClamp((cc.crush - 0.005) / 0.08, 0, 1) * 0.6 : 0;
 
-  /* Endpoints, aimed so they land on target AFTER contrast has had its turn.
-   * Solving them against the pre-contrast value made the two compound: measured
-   * on this camera, blacks put the black point on its 0.04 target and contrast
-   * then dragged it to 0.031, with p05 collapsing 0.204 -> 0.117. Inverting the
-   * target through the contrast curve first costs one bisection and stops it. */
-  var tHi = acContrastInv(0.97, sol.contrast), tLo = acContrastInv(0.04, sol.contrast);
-  var hiS = acPredict(hi, ev, sol), loS = acPredict(lo, ev, sol);
-  var hiLin = acS2L(hiS), loLin = acS2L(loS);
+    /* Endpoints, aimed so they land on target AFTER the tone curve and contrast
+     * have both had their turn. Solving them against the pre-contrast value made
+     * the two compound: measured on this camera, blacks put the black point on
+     * its 0.04 target and contrast then dragged it to 0.031, with p05 collapsing
+     * 0.204 -> 0.117. The target is walked back through contrast, then through
+     * the tone curve, so what is left is the linear value the slider multiplies. */
+    tHi = acToneInv(acS2L(acContrastInv(0.97, sol.contrast)));
+    tLo = acToneInv(acS2L(acContrastInv(0.04, sol.contrast)));
+    sol.whites = 0;
+    sol.blacks = 0;
+    hiLin = acPredictLin(hi, ev, sol);
+    loLin = acPredictLin(lo, ev, sol);
+    // The masks are keyed on the PRE-curve level, because that is where step 3
+    // of the shader reads them; the gates are checked on the post-curve one,
+    // because that is what the eye judges.
+    whMask = acSstep(0.5, 1.0, acL2S(hiLin));
+    blMask = 1 - acSstep(0, 0.35, acL2S(loLin));
+    hiS = acL2S(acTone(hiLin));
+    loS = acL2S(acTone(loLin));
 
-  // Whites: f = exp2(whites * 0.7 * whMask). Brighten-only, and only a white
-  // point that is still dull once contrast is in - one already near the top is
-  // either fine or clipping, and clipping is highlights' job.
-  var whMask = acSstep(0.5, 1.0, hiS);
-  if (acContrast(hiS, sol.contrast) < 0.95 && whMask > 0.02 && hiLin > 1e-4) {
-    sol.whites = acClamp(Math.log2(acS2L(tHi) / hiLin) / whMask * 0.8, 0, 1);
-  }
-  // Blacks: negative branch is newLuma *= exp2(blacks * 1.5 * blMask). Deepen-
-  // only - lifting a black point that already sits near zero buys nothing, and
-  // crushed shadows are shadows' job. The floor is checked on the post-contrast
-  // value, which is the one the eye judges.
-  var blMask = 1 - acSstep(0, 0.35, loS);
-  if (acContrast(loS, sol.contrast) > 0.08 && blMask > 0.02 && loLin > 1e-5) {
-    sol.blacks = acClamp(Math.log2(acS2L(tLo) / loLin) / (1.5 * blMask) * 0.6, -1, 0);
+    // Whites: f = exp2(whites * whMask). Brighten-only, and only a white point
+    // that is still dull once contrast is in - one already near the top is
+    // either fine or clipping, and clipping is highlights' job.
+    if (acContrast(hiS, sol.contrast) < 0.95 && whMask > 0.02 && hiLin > 1e-4) {
+      sol.whites = acClamp(Math.log2(tHi / hiLin) / whMask * 0.8, 0, 1);
+    }
+    // Blacks: negative branch is newLuma *= exp2(blacks * 1.5 * blMask).
+    // Deepen-only - lifting a black point that already sits near zero buys
+    // nothing, and crushed shadows are shadows' job.
+    if (acContrast(loS, sol.contrast) > 0.08 && blMask > 0.02 && loLin > 1e-5) {
+      sol.blacks = acClamp(Math.log2(tLo / loLin) / (1.5 * blMask) * 0.6, -1, 0);
+    }
   }
   return sol;
 }
@@ -5905,6 +5989,18 @@ function applyCameraAspect(metaText) {
   if (!(tagW > 0 && tagH > 0)) return;
   var want = tagW / tagH, have = state.texW / state.texH;
   if (!(want > 0.2 && want < 5)) return;
+  /* The tag is in SENSOR coordinates. A portrait frame is decoded already
+   * rotated, so the two are in different orientations and comparing them
+   * directly reads a 3:2 portrait shot as 125% too tall - measured on an A7R II
+   * portrait frame, tag 1.5038 against a decoded 0.6677, which cropped away 55%
+   * of the picture on load and was the "Camera turns my portrait into
+   * landscape" report. Turn the tag whichever way lands closer to what was
+   * actually decoded; that is the way the rotation went. Compared in log space
+   * so the two orientations are judged by the same measure. */
+  if (Math.abs(Math.log(want / have)) > Math.abs(Math.log(1 / (want * have)))) {
+    want = 1 / want;
+    var swap = tagW; tagW = tagH; tagH = swap;
+  }
   if (Math.abs(want - have) / have < 0.02) return;
 
   var cw = 1, ch = 1;

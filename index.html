@@ -3293,6 +3293,26 @@ function clearTexCache() {
   });
   state.tex = null;
 }
+/* Identity of the base texture, as a number that never repeats.
+ *
+ * The image-space passes (face, denoise, detail, sharpen, halation) cache their
+ * output against a signature, and that signature has to say WHICH pixels it was
+ * built from. texGen cannot: it is bumped when a load STARTS, so during the
+ * seconds a RAW spends decoding it already reads as the new image while
+ * state.tex is still the old one. A render in that window - and there is one,
+ * the load awaits several frames - cached the previous photo under the incoming
+ * generation, and when the new texture finally arrived the signature was
+ * unchanged (same camera, same size, same sliders), so every pass took the
+ * cache hit and the screen kept showing the photo before. Auto Light even
+ * solved against it. Keying on the texture itself cannot drift: a new upload is
+ * a new object, and switching resolution back and forth returns to the same
+ * object and is a real cache hit. */
+var texUidNext = 0;
+function texId(t) {
+  if (!t) return 0;
+  if (!t.__uid) t.__uid = ++texUidNext;
+  return t.__uid;
+}
 // Bind a cached base texture as the active one. Returns false if not cached
 // for the current image (a stale entry from a previous image does not count).
 function activateCachedRes(resKey) {
@@ -3449,7 +3469,7 @@ function computeDenoise() {
   var w = state.texW, h = state.texH;
   if (!ensureDnTargets(w, h)) return;   // float FBO unsupported -> skip
   var p = state.params;
-  var sig = [state.texGen, w, h, p.nrLuma, p.nrColor, faceDnKey()].join(':');
+  var sig = [texId(state.tex), w, h, p.nrLuma, p.nrColor, faceDnKey()].join(':');
   dnSrcAtBuild = faceSrcTex();   // sig covers the face source, so this holds on a cache hit too
   if (sig === dnSig) { dnActiveTex = dnB.tex; return; }   // cached
   var sigL = 0.115;                                 // fixed perceptual luma edge-stop
@@ -3611,7 +3631,7 @@ function computeCtd() {
   if (!ensureCtdTargets(w, h)) return;
   var p = state.params, src = ctdSrcTex();
   ctdSrcAtBuild = src;
-  var sig = [state.texGen, w, h, p.clarity, p.texture, p.dehaze,
+  var sig = [texId(state.tex), w, h, p.clarity, p.texture, p.dehaze,
     p.nrLuma, p.nrColor, faceDnKey()].join(':');
   if (sig === ctdSig) { ctdActiveTex = ctdT.tex; return; }
 
@@ -3722,7 +3742,7 @@ function computeSharpen() {
   if (!ensureShTarget(w, h)) return;
   var p = state.params;
   var src = sharpSrcTex();
-  var sig = [state.texGen, w, h, p.sharpness, p.nrLuma, p.nrColor, faceDnKey()].join(':');
+  var sig = [texId(state.tex), w, h, p.sharpness, p.nrLuma, p.nrColor, faceDnKey()].join(':');
   shSrcAtBuild = src;
   if (sig === shSig) { shActiveTex = shT.tex; return; }
   gl.disable(gl.SCISSOR_TEST);
@@ -3931,7 +3951,7 @@ function computeHalation() {
   if (!ensureHalTargets(w, h, div)) return;
   var src = halSrcTex();
   halSrcAtBuild = src;
-  var sig = [state.texGen, w, h, p.halation, p.halKnee, p.halWarm, p.halRing,
+  var sig = [texId(state.tex), w, h, p.halation, p.halKnee, p.halWarm, p.halRing,
     p.halTail, p.halBal, p.halAh, p.sharpness, p.clarity, p.texture, p.dehaze,
     p.nrLuma, p.nrColor, faceDnKey()].join(':');
   if (sig === halSig) { halActiveTex = halT.tex; return; }
@@ -11748,7 +11768,7 @@ function computeFace() {
   var eyePasses = Math.max(1, groups.length);
   var eyesOnB = (eyePasses % 2) === 0;
   var outTex = (eyesOnB !== !!smileFaces.length) ? faceTargetB.tex : faceTarget.tex;
-  var sig = [state.texGen, w, h, faceEditGen].join(':');
+  var sig = [texId(state.tex), w, h, faceEditGen].join(':');
   if (sig === faceSig) { faceActiveTex = outTex; return; }
   // Built BEFORE the passes below: the mosaic/blur layer re-renders the base
   // through faceRenderBase, which binds its own framebuffer.

@@ -90,15 +90,33 @@
   }
   #btnViewSize:hover { background: rgba(40,40,40,.9); }
   #btnViewSize svg { width: 13px; height: 13px; display: block; }
-  /* 100% / fit toggle (bottom-left of the photo) */
+  /* Bottom-left strip over the photo: the 100% / fit toggle, and the shot line
+     when it is switched on. One flex row, so the second chip cannot land on top
+     of the first whichever of them happens to be visible. */
+  #bottombar {
+    position: absolute; left: 10px; right: 10px; bottom: 10px; z-index: 8;
+    display: flex; align-items: center; gap: 8px;
+    pointer-events: none;              /* the gaps stay draggable as canvas */
+  }
+  #bottombar > * { pointer-events: auto; }
   #btn100 {
-    position: absolute; left: 10px; bottom: 10px; z-index: 8;
     background: rgba(20,20,20,.78); color: #d8d8d8; border: 1px solid #3a3a3a;
     border-radius: 6px; padding: 6px 10px; font-size: 12px; cursor: pointer;
-    font-variant-numeric: tabular-nums;
+    font-variant-numeric: tabular-nums; flex: none;
   }
   #btn100:hover { background: rgba(40,40,40,.9); }
   #btn100[hidden] { display: none; }
+  /* Shot line (I). Same chip as 100%, and it truncates rather than wraps - the
+     camera name is the long part and also the least urgent. */
+  #shotchip {
+    background: rgba(20,20,20,.78); color: #d8d8d8; border: 1px solid #3a3a3a;
+    border-radius: 6px; padding: 6px 10px; font-size: 12px;
+    font-variant-numeric: tabular-nums;
+    min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  #shotchip[hidden] { display: none; }
+  #shotchip .sep { color: #6a6a6a; padding: 0 6px; }
+  #shotchip .cam { color: #9a9a9a; }
   #glcanvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
   #thumb {
     position: absolute; inset: 0;
@@ -695,6 +713,7 @@
     #viewer.vh-lg { flex: 0 0 66vh; }
     #viewer.vh-sm { flex: 0 0 33vh; }
     #btnViewSize { display: flex; }
+    #bottombar { right: 56px; }   /* leave the pane-size button its corner */
     #sidebar {
       width: 100%;
       flex: 1 1 auto;
@@ -738,7 +757,10 @@
         <p>RAW (ARW, CR2, NEF, DNG, RAF ...), JPEG, PNG, WebP, HEIC, TIFF - or a .cube LUT / .dcp camera profile</p>
       </div>
       <div id="zoomchip" hidden></div>
-      <button id="btn100" hidden title="Toggle 100% (actual pixels) vs fit">100%</button>
+      <div id="bottombar">
+        <button id="btn100" hidden title="Toggle 100% (actual pixels) vs fit">100%</button>
+        <div id="shotchip" hidden title="Shot info (press I to hide)"></div>
+      </div>
       <svg id="gizmo" hidden></svg>
       <canvas id="facemask" hidden></canvas>
       <button id="btnViewSize" title="Resize photo pane" aria-label="Resize photo pane">
@@ -776,7 +798,7 @@
       <div id="glerror" hidden>WebGL2 is not available in this browser - the viewer cannot render.</div>
     </div>
     <div id="footer">
-      <span id="footerhint">Wheel: zoom &#183; Drag: pan &#183; Double-click: fit &#183; RAW via LibRaw (run serve.cmd or use the live site) covers 1000+ modern bodies - Sony ARW incl. ZV-E1, Canon CR2/CR3, Nikon NEF, DNG, RAF, ORF, RW2 and more; dcraw decodes older bodies offline (file://). Plus JPEG, PNG, WebP, HEIC, TIFF and .cube LUTs.</span>
+      <span id="footerhint">Wheel: zoom &#183; Drag: pan &#183; Double-click: fit &#183; I: shot info &#183; RAW via LibRaw (run serve.cmd or use the live site) covers 1000+ modern bodies - Sony ARW incl. ZV-E1, Canon CR2/CR3, Nikon NEF, DNG, RAF, ORF, RW2 and more; dcraw decodes older bodies offline (file://). Plus JPEG, PNG, WebP, HEIC, TIFF and .cube LUTs.</span>
       <div id="statusbar-tools">
         <button id="btnAB" disabled title="Make an adjustment first to enable A/B compare">A</button>
         <button id="btnABSplit" disabled title="Split-screen A|B compare with a movable divider">A/B</button>
@@ -1755,6 +1777,7 @@ var state = {
   cropPortrait: false, // crop ratio orientation toggle
   cropRatioWH: null,   // [w,h] of the active ratio preset (null = free)
   camCrop: null,       // the camera's own framing, remembered so it can be restored
+  shot: null,          // { camera, iso, aperture, shutter, focal } for the shot chip
   selectedOverlay: null, // index of the overlay being moved by canvas drag
   thumbBytes: null,    // embedded JPEG bytes, kept as fallback for undecodable RAWs
   busy: false,         // a load is in progress (blocks concurrent loads)
@@ -5172,6 +5195,242 @@ function resetAllSliders() {
   requestRender();
 }
 
+/* ============================================================
+ * Shot info: ISO, aperture, shutter, focal length, camera, on I.
+ *
+ * Two sources, one shape. A RAW arrives with dcraw's identify text already in
+ * hand, so it is read from there and costs nothing extra; anything else - and
+ * any RAW whose identify failed - is read straight out of EXIF. Both normalise
+ * to plain numbers before formatting, so the line reads identically whichever
+ * path produced it rather than echoing each decoder's own spelling.
+ * ============================================================ */
+var SHOT_KEY = 'rawviewer.shotInfo';
+var shotChipOn = false;
+try { shotChipOn = localStorage.getItem(SHOT_KEY) === '1'; } catch (e) {}
+
+var EXIF_TYPE_SIZE = { 1: 1, 2: 1, 3: 2, 4: 4, 5: 8, 6: 1, 7: 1, 8: 2, 9: 4, 10: 8, 11: 4, 12: 8 };
+var EXIF_SUBIFD = 0x8769;
+var EXIF_FIELD = {
+  0x010F: 'make', 0x0110: 'model',
+  0x829A: 'shutter',   // ExposureTime, seconds
+  0x829D: 'aperture',  // FNumber
+  0x8827: 'iso',       // ISOSpeedRatings
+  0x8832: 'iso2',      // RecommendedExposureIndex, used when ISO is absent
+  0x920A: 'focal',     // FocalLength, mm
+  0xA434: 'lens'       // LensModel
+};
+
+function exifVal(dv, type, count, off, le) {
+  if (type === 2) {                                   // ASCII, NUL-terminated
+    var s = '';
+    for (var c = 0; c < count; c++) {
+      var b = dv.getUint8(off + c);
+      if (!b) break;
+      s += String.fromCharCode(b);
+    }
+    return s;
+  }
+  if (type === 3) return dv.getUint16(off, le);
+  if (type === 4) return dv.getUint32(off, le);
+  if (type === 5) return dv.getUint32(off, le) / (dv.getUint32(off + 4, le) || 1);
+  if (type === 10) return dv.getInt32(off, le) / (dv.getInt32(off + 4, le) || 1);
+  if (type === 11) return dv.getFloat32(off, le);
+  return null;
+}
+
+/* One IFD, following the Exif SubIFD pointer once. `base` is where the TIFF
+ * header starts - 0 for a real TIFF/RAW, past "Exif\0\0" for a JPEG. */
+function exifWalk(dv, base, ifdOff, le, out, depth) {
+  if (depth > 2 || !ifdOff || base + ifdOff + 2 > dv.byteLength) return;
+  var n = dv.getUint16(base + ifdOff, le);
+  if (n > 1024) return;                               // not a directory we trust
+  for (var e = 0; e < n; e++) {
+    var ent = base + ifdOff + 2 + e * 12;
+    if (ent + 12 > dv.byteLength) return;
+    var tag = dv.getUint16(ent, le);
+    var type = dv.getUint16(ent + 2, le);
+    var count = dv.getUint32(ent + 4, le);
+    var sz = EXIF_TYPE_SIZE[type];
+    if (!sz || count > 0xFFFF) continue;
+    if (tag === EXIF_SUBIFD) {
+      exifWalk(dv, base, dv.getUint32(ent + 8, le), le, out, depth + 1);
+      continue;
+    }
+    var key = EXIF_FIELD[tag];
+    if (!key || out[key] != null) continue;
+    // Up to four bytes live inline in the entry; anything larger is an offset.
+    var bytes = sz * count;
+    var off = bytes <= 4 ? ent + 8 : base + dv.getUint32(ent + 8, le);
+    if (off < 0 || off + bytes > dv.byteLength) continue;
+    var v;
+    try { v = exifVal(dv, type, count, off, le); } catch (ex) { continue; }
+    if (v != null && v !== '') out[key] = v;
+  }
+}
+
+/* JPEG keeps EXIF as a TIFF blob inside an APP1 segment. Returns the offset of
+ * the TIFF header, or -1 when the file carries none. */
+function jpegExifBase(dv) {
+  if (dv.byteLength < 4 || dv.getUint16(0, false) !== 0xFFD8) return -1;
+  var p = 2;
+  while (p + 4 <= dv.byteLength) {
+    if (dv.getUint8(p) !== 0xFF) { p++; continue; }
+    var marker = dv.getUint8(p + 1);
+    if (marker === 0xFF) { p++; continue; }                  // fill byte
+    if (marker === 0x01 || (marker >= 0xD0 && marker <= 0xD9)) { p += 2; continue; }
+    if (marker === 0xDA) return -1;                          // scan data, done looking
+    var len = dv.getUint16(p + 2, false);
+    if (len < 2) return -1;
+    if (marker === 0xE1 && p + 10 <= dv.byteLength &&
+        dv.getUint32(p + 4, false) === 0x45786966 &&         // "Exif"
+        dv.getUint16(p + 8, false) === 0) {
+      return p + 10;
+    }
+    p += 2 + len;
+  }
+  return -1;
+}
+
+function shotNum(v) {
+  v = typeof v === 'string' ? parseFloat(v) : v;
+  return (typeof v === 'number' && isFinite(v) && v > 0) ? v : 0;
+}
+
+function shotFinish(r) {
+  var make = String(r.make || '').trim();
+  var model = String(r.model || '').trim();
+  var cam;
+  // Most bodies already repeat the make inside the model ("NIKON D850"); the
+  // ones that don't ("ILCE-7RM2") need it prepended to be readable.
+  if (model && make && model.toLowerCase().indexOf(make.toLowerCase()) !== 0) cam = make + ' ' + model;
+  else cam = model || make;
+  var shot = {
+    camera: cam.replace(/\s+/g, ' ').trim(),
+    iso: shotNum(r.iso) || shotNum(r.iso2),
+    aperture: shotNum(r.aperture),
+    shutter: shotNum(r.shutter),
+    focal: shotNum(r.focal),
+    lens: String(r.lens || '').trim()
+  };
+  if (!shot.camera && !shot.iso && !shot.aperture && !shot.shutter && !shot.focal) return null;
+  return shot;
+}
+
+/* Read from a TIFF-structured buffer (RAW, TIFF) or a JPEG. `bytes` may be a
+ * Uint8Array view into a larger buffer, so the view's own window is honoured. */
+function shotFromExif(bytes) {
+  if (!bytes) return null;
+  var dv;
+  try {
+    dv = bytes instanceof DataView ? bytes
+       : bytes.buffer ? new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
+       : new DataView(bytes);
+  } catch (e) { return null; }
+  if (dv.byteLength < 12) return null;
+  var base = 0;
+  if (dv.getUint16(0, false) === 0xFFD8) {
+    base = jpegExifBase(dv);
+    if (base < 0) return null;
+  }
+  if (base + 8 > dv.byteLength) return null;
+  var bo = dv.getUint16(base, false), le;
+  if (bo === 0x4949) le = true;
+  else if (bo === 0x4D4D) le = false;
+  else return null;
+  if (dv.getUint16(base + 2, le) !== 42) return null;
+  var raw = {};
+  try { exifWalk(dv, base, dv.getUint32(base + 4, le), le, raw, 0); } catch (e2) { return null; }
+  return shotFinish(raw);
+}
+
+/* dcraw -i -v prints these as free text ("Shutter: 1/60.0 sec"), so the numbers
+ * come back out of it rather than being reprinted as-is. */
+function shotFromIdentify(metaText) {
+  if (!metaText) return null;
+  function grab(re) { var m = re.exec(metaText); return m ? m[1].trim() : ''; }
+  var shutter = grab(/^Shutter:\s*(.+?)(?:\s*sec\.?)?\s*$/m);
+  var frac = /^(\d+(?:\.\d+)?)\s*\/\s*(\d+(?:\.\d+)?)$/.exec(shutter);
+  return shotFinish({
+    model: grab(/^Camera:\s*(.+)$/m),
+    iso: grab(/^ISO speed:\s*([\d.]+)/m),
+    aperture: grab(/^Aperture:\s*f?\/?\s*([\d.]+)/m),
+    focal: grab(/^Focal length:\s*([\d.]+)/m),
+    shutter: frac ? (parseFloat(frac[1]) / (parseFloat(frac[2]) || 1)) : shutter
+  });
+}
+
+function shotParts(s) {
+  var out = [];
+  if (s.iso) out.push('ISO ' + Math.round(s.iso));
+  if (s.aperture) {
+    out.push('f/' + (Math.abs(s.aperture - Math.round(s.aperture)) < 0.05
+      ? Math.round(s.aperture) : s.aperture.toFixed(1)));
+  }
+  if (s.shutter) {
+    out.push(s.shutter >= 1
+      ? (Math.round(s.shutter * 10) / 10) + 's'
+      : '1/' + Math.round(1 / s.shutter) + 's');
+  }
+  if (s.focal) out.push(Math.round(s.focal) + 'mm');
+  return out;
+}
+
+function updateShotChip() {
+  var el = document.getElementById('shotchip');
+  if (!el) return;
+  var s = state.shot;
+  if (!shotChipOn || !s || !state.tex) { el.hidden = true; el.textContent = ''; return; }
+  var parts = shotParts(s);
+  el.textContent = '';
+  function sep() {
+    var sp = document.createElement('span');
+    sp.className = 'sep';
+    sp.textContent = '·';
+    return sp;
+  }
+  parts.forEach(function (p, i) {
+    if (i) el.appendChild(sep());
+    el.appendChild(document.createTextNode(p));
+  });
+  if (s.camera) {
+    if (parts.length) el.appendChild(sep());
+    var c = document.createElement('span');
+    c.className = 'cam';
+    c.textContent = s.camera;
+    el.appendChild(c);
+  }
+  el.title = (s.lens ? s.lens + ' - ' : '') + 'press I to hide';
+  el.hidden = !parts.length && !s.camera;
+}
+
+/* Called by both loaders. `metaText` is dcraw's identify output when there was
+ * one; EXIF is the fallback, and for raster files the only source. */
+function readShotInfo(metaText, bytes) {
+  var a = shotFromIdentify(metaText);
+  var b = shotFromExif(bytes);
+  // identify wins where the two disagree - it is the decoder that actually read
+  // the file - but it never prints the lens, so EXIF fills whatever it left out.
+  if (a && b) {
+    ['camera', 'iso', 'aperture', 'shutter', 'focal', 'lens'].forEach(function (k) {
+      if (!a[k]) a[k] = b[k];
+    });
+  }
+  state.shot = a || b || null;
+  updateShotChip();
+}
+
+document.addEventListener('keydown', function (e) {
+  if (e.key !== 'i' && e.key !== 'I') return;
+  if (e.ctrlKey || e.metaKey || e.altKey) return;
+  var t = e.target;
+  if (t && ((t.matches && t.matches('input, textarea, select')) || t.isContentEditable)) return;
+  e.preventDefault();
+  shotChipOn = !shotChipOn;
+  try { localStorage.setItem(SHOT_KEY, shotChipOn ? '1' : '0'); } catch (ex) {}
+  updateShotChip();
+  if (shotChipOn && state.tex && !state.shot) toast('This file records no shot info.');
+});
+
 /* Metadata panel */
 function renderMetadata(metaText, file) {
   var table = document.getElementById('metatable');
@@ -5418,6 +5677,7 @@ async function loadRasterImage(file) {
 
   // Produce a drawable source (ImageBitmap or canvas) plus its true dimensions.
   var source, srcW, srcH, typeLabel;
+  var shotBytes = null;   // head of the file, kept only to read EXIF out of
   try {
     if (isHeic) {
       var bytes = new Uint8Array(await file.arrayBuffer());
@@ -5436,7 +5696,11 @@ async function loadRasterImage(file) {
       tc.getContext('2d').putImageData(new ImageData(tif.rgba, tif.width, tif.height), 0, 0);
       source = tc; srcW = tif.width; srcH = tif.height;
       typeLabel = 'TIFF';
+      shotBytes = tbytes;
     } else {
+      // EXIF sits in the first APP1 segment, so the head of the file is enough
+      // and a 60 MB JPEG does not get pulled into memory twice.
+      shotBytes = new Uint8Array(await file.slice(0, 262144).arrayBuffer());
       var bmp = await createImageBitmap(file);
       source = bmp; srcW = bmp.width; srcH = bmp.height;
       typeLabel = file.type || 'Image';
@@ -5485,6 +5749,8 @@ async function loadRasterImage(file) {
     thumbImg.style.display = 'none';
     if (thumbImg.src) { URL.revokeObjectURL(thumbImg.src); thumbImg.removeAttribute('src'); }
     renderMetadata('Type: ' + typeLabel + '\nDimensions: ' + srcW + ' x ' + srcH, file);
+    // The synthetic metaText above carries no shot data, so EXIF is the source.
+    readShotInfo(null, shotBytes);
     setControlsEnabled(true);
     var chk = document.getElementById('chkFullRes');
     chk.checked = false;
@@ -5604,6 +5870,9 @@ async function loadFile(file) {
     dropzone.classList.remove('hidden');
   }
   if (ok) applyCameraAspect(metaText);
+  // After the decode, not before: a failed load leaves the previous picture on
+  // screen, and its shot line is the one still telling the truth.
+  if (ok) readShotInfo(metaText, state.rawBytes);
   if (ok && typeof measureContrastPivot === 'function') measureContrastPivot();
   // Latched AUTO groups re-solve here: the answer is per image, so it has to be
   // recomputed per image rather than carried over from the last one.

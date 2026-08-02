@@ -823,6 +823,7 @@
     <div id="cropbar" hidden>
       <div class="btnrow cropbar-top">
         <button id="btnCropReset">Full</button>
+        <button id="btnCropCamera" disabled title="Restore the framing the camera was set to">Camera</button>
         <button class="ratio active" data-w="0" data-h="0" title="Free ratio">Free</button>
         <button id="btnOrient" title="Swap portrait / landscape">&#8646; Landscape</button>
         <span class="cropbar-sep"></span>
@@ -1753,6 +1754,7 @@ var state = {
   cropAspect: 0,       // locked crop ratio (pixel W:H); 0 = free
   cropPortrait: false, // crop ratio orientation toggle
   cropRatioWH: null,   // [w,h] of the active ratio preset (null = free)
+  camCrop: null,       // the camera's own framing, remembered so it can be restored
   selectedOverlay: null, // index of the overlay being moved by canvas drag
   thumbBytes: null,    // embedded JPEG bytes, kept as fallback for undecodable RAWs
   busy: false,         // a load is in progress (blocks concurrent loads)
@@ -5467,6 +5469,7 @@ async function loadRasterImage(file) {
       data[o++] = 1;
     }
     state.rawBytes = null; // raster images cannot be re-decoded at full res
+    state.camCrop = null;  // a raster file records no framing of its own
     state.texGen++;        // new image: cached detections/denoise keyed on texGen go stale
     state.baseName = file.name.replace(/\.[^.]+$/, '') || 'export';
     state.fileName = file.name;
@@ -5625,8 +5628,8 @@ async function loadFile(file) {
  * the extra room. Only fires on a real disagreement (>2%), so a plain 3:2 frame
  * is untouched. */
 function applyCameraAspect(metaText) {
+  state.camCrop = null;
   if (!metaText || !state.texW || !state.texH) return;
-  if (state.crop && (state.crop.w !== 1 || state.crop.h !== 1)) return;
   var m = /Full size:\s*(\d+)\s*x\s*(\d+)/.exec(metaText);
   if (!m) return;
   var tagW = +m[1], tagH = +m[2];
@@ -5638,9 +5641,34 @@ function applyCameraAspect(metaText) {
   var cw = 1, ch = 1;
   if (want > have) ch = have / want;   // wider frame tagged: trim top and bottom
   else cw = want / have;               // taller frame tagged: trim the sides
-  state.crop = { x: (1 - cw) / 2, y: (1 - ch) / 2, w: cw, h: ch };
+  /* Remembered, not just applied. Once the crop is reset to the full sensor the
+   * framing is otherwise unrecoverable without reloading the file, which is not
+   * a reasonable way to ask for it back - hence the Camera button in the crop
+   * bar, which reads this. */
+  state.camCrop = { x: (1 - cw) / 2, y: (1 - ch) / 2, w: cw, h: ch, tagW: tagW, tagH: tagH };
+  if (state.crop && (state.crop.w !== 1 || state.crop.h !== 1)) return;
+  state.crop = { x: state.camCrop.x, y: state.camCrop.y, w: cw, h: ch };
   toast('Camera framing applied: ' + tagW + ' x ' + tagH +
-    '. The raw holds the full sensor - reset the crop to see all of it.');
+    '. The raw holds the full sensor - "Full" in the crop bar shows all of it, ' +
+    '"Camera" brings this back.');
+}
+
+// Put the crop back to the camera's tagged framing. Safe to call any time.
+function restoreCameraCrop() {
+  var cc = state.camCrop;
+  if (!cc) return false;
+  if (typeof captureAbBefore === 'function') captureAbBefore();
+  state.crop = { x: cc.x, y: cc.y, w: cc.w, h: cc.h };
+  return true;
+}
+function updateCameraCropBtn() {
+  var b = document.getElementById('btnCropCamera');
+  if (!b) return;
+  var cc = state.camCrop;
+  b.disabled = !cc;
+  b.title = cc
+    ? 'Restore the framing the camera was set to (' + cc.tagW + ' x ' + cc.tagH + ')'
+    : 'This file does not record a framing different from the full sensor';
 }
 
 /* Load dcraw's embedded JPEG as the working image (fallback for undecodable
@@ -8002,6 +8030,7 @@ function enterCropMode() {
   setCropAspect(0);
   btnCrop.classList.add('active');
   cropBar.hidden = false;
+  updateCameraCropBtn();   // availability is per image
   requestRender();
 }
 
@@ -8086,6 +8115,15 @@ document.getElementById('btnCropReset').addEventListener('click', function () {
   state.crop = { x: 0, y: 0, w: 1, h: 1 };
   setCropAspect(0);
   updateCropBox();
+});
+document.getElementById('btnCropCamera').addEventListener('click', function () {
+  if (!restoreCameraCrop()) return;
+  // Free ratio: the crop already IS the camera's ratio, and locking the box to
+  // it would only stop the user nudging the framing afterwards.
+  setCropAspect(0);
+  updateCropBox();
+  requestRender();
+  toast('Camera framing restored: ' + state.camCrop.tagW + ' x ' + state.camCrop.tagH + '.');
 });
 Array.prototype.forEach.call(document.querySelectorAll('#cropbar .ratio'), function (b) {
   b.addEventListener('click', function () {

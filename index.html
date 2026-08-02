@@ -1843,6 +1843,29 @@ var SLIDER_GROUPS = [
     { id: 'gamma',    label: 'Gamma',    min: 0.3, max: 2.5, step: 0.01, def: 1 },
     { id: 'vignette', label: 'Vignette', min: -1,  max: 1,   step: 0.01, def: 0 }
   ]},
+  { group: 'Halation', items: [
+    /* Light that got through the emulsion, reflected off the back of the film
+     * base and exposed it a second time from behind, in a ring around every
+     * bright source. Run as an image-space pass - see computeHalation().
+     *
+     * Ring and Tail are given as a percentage of the LONG EDGE, so a setting
+     * means the same thing on a 24 MP frame and on a web-sized export, and the
+     * number on the slider is one you can measure in the picture. */
+    { id: 'halation',  label: 'Halation',  min: 0, max: 100, step: 1, def: 0,
+      fmt: function (v) { return v.toFixed(0); } },
+    { id: 'halKnee',   label: 'Threshold', min: 0, max: 95,  step: 1, def: 0,
+      fmt: function (v) { return v.toFixed(0); } },
+    { id: 'halWarm',   label: 'Halo warmth', min: 0, max: 200, step: 1, def: 115,
+      fmt: function (v) { return v.toFixed(0); } },
+    { id: 'halRing',   label: 'Ring radius', min: 0.2, max: 6, step: 0.05, def: 0.8,
+      fmt: function (v) { return v.toFixed(2) + ' %'; } },
+    { id: 'halTail',   label: 'Tail',      min: 0.5, max: 20, step: 0.1, def: 4,
+      fmt: function (v) { return v.toFixed(1) + ' %'; } },
+    { id: 'halBal',    label: 'Ring / tail', min: 0, max: 100, step: 1, def: 65,
+      fmt: function (v) { return v.toFixed(0); } },
+    { id: 'halAh',     label: 'Anti-halation', min: 0, max: 100, step: 1, def: 0,
+      fmt: function (v) { return v.toFixed(0); } }
+  ]},
   { group: 'Denoise', items: [
     // Multi-scale a-trous wavelet, run first on the linear RAW source (before
     // grading, so grain re-adds texture on top). Color kills chroma blotches
@@ -2320,17 +2343,18 @@ var DN_COMBINE_FRAG = [
  *   bought only 38% more effect), so the slider opens it up as it climbs.
  *
  * Noise coring below 0.4% is fixed and not exposed - one slider, one variable. */
-/* Clarity / Texture / Dehaze - three mid-frequency contrast tools, ported from
- * ComfyUI-Darkroom's clarity_texture_dehaze node and rebuilt for the GPU.
+/* Clarity / Texture / Dehaze - three mid-frequency contrast tools.
  *
  * All three are unsharp masks at different scales, and the scales are what make
- * them different tools:
+ * them different tools (the scales themselves are measured - see
+ * CTD_WIDE_FRAC):
  *
- *   clarity   detail against a very large blur (sigma = 4% of the long edge).
- *             Midtone punch - the thing that reads as "depth" and is most of
- *             what separates a finished photo from a flat raw render.
- *   texture   a BAND between a 1px blur and a 1% blur, so it lifts fine detail
- *             without touching either grain or the large shapes clarity owns.
+ *   clarity   detail against a very large blur. Midtone punch - the thing that
+ *             reads as "depth" and is most of what separates a finished photo
+ *             from a flat raw render.
+ *   texture   a BAND between a 1px blur and the narrow scale, so it lifts fine
+ *             detail without touching either grain or the large shapes clarity
+ *             owns.
  *   dehaze    dark channel prior. Haze lifts the darkest channel of every patch
  *             off zero; measuring that floor gives a transmission map, and
  *             dividing it out pulls the contrast back.
@@ -2394,6 +2418,134 @@ var CTD_BLUR_FRAG = [
   '    wsum += w;',
   '  }',
   '  frag = vec4(acc / wsum, 0.0, 1.0);',
+  '}'
+].join('\n');
+
+/* ---- Halation ---------------------------------------------------------------
+ * Downsample to the pyramid AND extract the halating energy in one pass, since
+ * both are box operations over the same footprint. A plain bilinear reduction
+ * would drop exactly what halates most - a small specular hit only a couple of
+ * pixels across - so the footprint is really averaged rather than sampled. */
+var HAL_DOWN_FRAG = [
+  '#version 300 es',
+  'precision highp float;',
+  'in vec2 v_uv;',
+  'out vec4 frag;',
+  'uniform sampler2D u_src;',
+  'uniform vec2 u_texel;',   // 1/w, 1/h of the SOURCE
+  'uniform float u_div;',    // pyramid divisor
+  'uniform float u_knee;',   // 0 = every photon halates, which is the physical case
+  'void main() {',
+  '  vec3 acc = vec3(0.0);',
+  '  float sc = 1.0 / max(1.0 - u_knee, 1e-3);',
+  // 4x4 bilinear taps spread across the footprint = 8x8 source texels.
+  // The threshold is applied PER TAP, before the average. Applied after, a small
+  // specular hit is averaged down under its own threshold and stops halating -
+  // measured on a 3px disc, threshold 50 killed the halo outright even though
+  // the disc itself was at full white.
+  '  for (int y = 0; y < 4; y++) {',
+  '    for (int x = 0; x < 4; x++) {',
+  '      vec2 o = (vec2(float(x), float(y)) + 0.5) / 4.0 - 0.5;',
+  '      vec3 s = max(texture(u_src, v_uv + o * u_div * u_texel).rgb, vec3(0.0));',
+  '      acc += max(s - u_knee, vec3(0.0)) * sc;',
+  '    }',
+  '  }',
+  '  frag = vec4(acc / 16.0, 1.0);',
+  '}'
+].join('\n');
+
+/* The ring itself, as a polar quadrature of the exact P_TIR profile.
+ *
+ * A sum of gaussians cannot do this: the Fresnel reflectance JUMPS to 1 at the
+ * critical angle, and fitting that discontinuity with smooth kernels drives the
+ * centre negative (measured: rim/centre -1.16 at the default balance, against a
+ * true +7.70). Sampling the annulus directly gets the jump for free, and the
+ * per-ring weights come from integrating the profile over each annulus, so the
+ * energy is right by construction rather than by fit. */
+var HAL_RING_FRAG = [
+  '#version 300 es',
+  'precision highp float;',
+  'in vec2 v_uv;',
+  'out vec4 frag;',
+  'uniform sampler2D u_src;',
+  'uniform vec2 u_texel;',
+  'uniform int u_rings;',
+  'uniform vec3 u_ring[16];',   // x = radius (px), y = angle count, z = weight per tap
+  'void main() {',
+  '  vec3 acc = vec3(0.0);',
+  '  for (int j = 0; j < 16; j++) {',
+  '    if (j >= u_rings) break;',
+  '    float r = u_ring[j].x;',
+  '    int m = int(u_ring[j].y);',
+  '    float w = u_ring[j].z;',
+  '    if (m <= 0) continue;',
+  // Offset every ring by half a step so the tap lattices do not line up into
+  // spokes when several rings share an angle count.
+  '    float phi0 = 3.14159265 * float(j) / float(m);',
+  '    for (int k = 0; k < 48; k++) {',
+  '      if (k >= m) break;',
+  '      float a = phi0 + 6.28318531 * float(k) / float(m);',
+  '      acc += texture(u_src, v_uv + vec2(cos(a), sin(a)) * r * u_texel).rgb * w;',
+  '    }',
+  '  }',
+  '  frag = vec4(acc, 1.0);',
+  '}'
+].join('\n');
+
+/* Separable gaussian carrying rgb, for the diffuse tail. Strided so a sigma far
+ * wider than the tap budget still gets its full width: the tail has no high
+ * frequencies in it by definition, so sampling it coarsely costs nothing. */
+var HAL_BLUR_FRAG = [
+  '#version 300 es',
+  'precision highp float;',
+  'in vec2 v_uv;',
+  'out vec4 frag;',
+  'uniform sampler2D u_src;',
+  'uniform vec2 u_step;',
+  'uniform float u_sigma;',
+  'void main() {',
+  '  float sig = max(u_sigma, 0.35);',
+  '  float stride = max(1.0, ceil(sig / 8.0));',
+  '  int rad = int(min(ceil(sig * 2.5 / stride), 24.0));',
+  '  float inv = 1.0 / (2.0 * sig * sig);',
+  '  vec3 acc = vec3(0.0);',
+  '  float wsum = 0.0;',
+  '  for (int i = -24; i <= 24; i++) {',
+  '    if (i < -rad || i > rad) continue;',
+  '    float d = float(i) * stride;',
+  '    float w = exp(-d * d * inv);',
+  '    acc += texture(u_src, v_uv + u_step * d).rgb * w;',
+  '    wsum += w;',
+  '  }',
+  '  frag = vec4(acc / wsum, 1.0);',
+  '}'
+].join('\n');
+
+/* Composite. Additive in linear light, deliberately NOT the hue-preserving
+ * ratio-recombine the other passes use: halation ADDS coloured exposure, and
+ * that hue shift toward the halo tint IS the look. */
+var HAL_APPLY_FRAG = [
+  '#version 300 es',
+  'precision highp float;',
+  'in vec2 v_uv;',
+  'out vec4 frag;',
+  'uniform sampler2D u_src;',
+  'uniform sampler2D u_ring;',
+  'uniform sampler2D u_t0;',
+  'uniform sampler2D u_t1;',
+  'uniform sampler2D u_t2;',
+  'uniform vec3 u_tailC;',   // cascade weights fitted to exp(-r/L)/L
+  'uniform vec3 u_halo;',    // per-channel weights, w_R > w_G > w_B
+  'uniform float u_amt;',    // strength * (1 - ah)^2, already folded
+  'uniform float u_bal;',    // ring vs tail
+  'void main() {',
+  '  vec4 base = texture(u_src, v_uv);',
+  '  vec3 ring = texture(u_ring, v_uv).rgb;',
+  '  vec3 tail = texture(u_t0, v_uv).rgb * u_tailC.x',
+  '            + texture(u_t1, v_uv).rgb * u_tailC.y',
+  '            + texture(u_t2, v_uv).rgb * u_tailC.z;',
+  '  vec3 halo = mix(tail, ring, u_bal) * u_halo * u_amt;',
+  '  frag = vec4(max(base.rgb + max(halo, vec3(0.0)), vec3(0.0)), base.a);',
   '}'
 ].join('\n');
 
@@ -2523,6 +2675,8 @@ var SHARP_FRAG = [
 var dnProg = null, dnUni = {}, dncProg = null, dncUni = {}, shProg = null, shUni = {};
 var ctdDownProg = null, ctdDownUni = {}, ctdBlurProg = null, ctdBlurUni = {};
 var ctdMinProg = null, ctdMinUni = {}, ctdApplyProg = null, ctdApplyUni = {};
+var halDownProg = null, halDownUni = {}, halRingProg = null, halRingUni = {};
+var halBlurProg = null, halBlurUni = {}, halApplyProg = null, halApplyUni = {};
 
 /* ============================================================
  * Smile Detect face bake: a pre-grade pass on the linear source, like denoise.
@@ -2970,6 +3124,51 @@ function initGL() {
   gl.uniform1i(ctdApplyUni.narrow, 7);
   gl.uniform1i(ctdApplyUni.dark, 8);
 
+  halDownProg = linkQuadProg(HAL_DOWN_FRAG, 'Halation down');
+  halDownUni = {
+    src: gl.getUniformLocation(halDownProg, 'u_src'),
+    texel: gl.getUniformLocation(halDownProg, 'u_texel'),
+    div: gl.getUniformLocation(halDownProg, 'u_div'),
+    knee: gl.getUniformLocation(halDownProg, 'u_knee')
+  };
+  gl.useProgram(halDownProg); gl.uniform1i(halDownUni.src, 0);
+
+  halRingProg = linkQuadProg(HAL_RING_FRAG, 'Halation ring');
+  halRingUni = {
+    src: gl.getUniformLocation(halRingProg, 'u_src'),
+    texel: gl.getUniformLocation(halRingProg, 'u_texel'),
+    rings: gl.getUniformLocation(halRingProg, 'u_rings'),
+    ring: gl.getUniformLocation(halRingProg, 'u_ring')
+  };
+  gl.useProgram(halRingProg); gl.uniform1i(halRingUni.src, 0);
+
+  halBlurProg = linkQuadProg(HAL_BLUR_FRAG, 'Halation blur');
+  halBlurUni = {
+    src: gl.getUniformLocation(halBlurProg, 'u_src'),
+    step: gl.getUniformLocation(halBlurProg, 'u_step'),
+    sigma: gl.getUniformLocation(halBlurProg, 'u_sigma')
+  };
+  gl.useProgram(halBlurProg); gl.uniform1i(halBlurUni.src, 0);
+
+  halApplyProg = linkQuadProg(HAL_APPLY_FRAG, 'Halation apply');
+  halApplyUni = {
+    src: gl.getUniformLocation(halApplyProg, 'u_src'),
+    ring: gl.getUniformLocation(halApplyProg, 'u_ring'),
+    t0: gl.getUniformLocation(halApplyProg, 'u_t0'),
+    t1: gl.getUniformLocation(halApplyProg, 'u_t1'),
+    t2: gl.getUniformLocation(halApplyProg, 'u_t2'),
+    tailC: gl.getUniformLocation(halApplyProg, 'u_tailC'),
+    halo: gl.getUniformLocation(halApplyProg, 'u_halo'),
+    amt: gl.getUniformLocation(halApplyProg, 'u_amt'),
+    bal: gl.getUniformLocation(halApplyProg, 'u_bal')
+  };
+  gl.useProgram(halApplyProg);
+  gl.uniform1i(halApplyUni.src, 0);
+  gl.uniform1i(halApplyUni.ring, 6);
+  gl.uniform1i(halApplyUni.t0, 7);
+  gl.uniform1i(halApplyUni.t1, 8);
+  gl.uniform1i(halApplyUni.t2, 9);
+
   // Smile Detect face bake program (shares the quad; src unit 0, donor unit 5).
   faceProg = gl.createProgram();
   gl.attachShader(faceProg, compileShader(gl.VERTEX_SHADER, DN_VERT));
@@ -3318,6 +3517,42 @@ function sharpSrcTex() {
 var ctdT = null, ctdP = [null, null, null, null], ctdSig = '';
 var ctdActiveTex = null, ctdSrcAtBuild = null;
 var CTD_DIV = 8;
+/* The two scales that make clarity and texture different tools. Both are a
+ * fraction of the long edge, so a setting survives a resize.
+ *
+ * Set by measurement, not taste. Swept on a ZV-E1 raw at 50, reporting the
+ * detail energy each setting adds against the un-processed chain output, at a
+ * coarse (128 px), mid (32 px) and fine (4 px) scale:
+ *
+ *   clarity, wide sigma      coarse   mid    fine
+ *     2%                      1.231  1.258  1.268
+ *     3%                      1.252  1.262  1.271
+ *     3.5%  <- chosen         1.258  1.264  1.272
+ *     4%                      1.263  1.266  1.273
+ *     6%                      1.270  1.270  1.276
+ *     8%                      1.273  1.272  1.277
+ *
+ * The interesting part is that this is a PLATEAU: everything from 3% up is
+ * within one per cent of everything else. The constant is not a creative
+ * choice, it is the knee of a curve that flattens - so take the knee, where the
+ * coarse authority has arrived but the blur is not yet wider (and more
+ * halo-prone) than it needs to be.
+ *
+ *   texture, narrow sigma    coarse   mid    fine
+ *     0.5%                    1.131  1.215  1.203
+ *     0.75% <- chosen         1.158  1.231  1.206
+ *     1%                      1.179  1.238  1.208
+ *     1.5%                    1.208  1.244  1.211
+ *     2%                      1.227  1.247  1.212
+ *
+ * Here the choice is real. Texture must NOT reach the large shapes - that is
+ * clarity's job, and two sliders doing the same thing is worse than one. Coarse
+ * contamination climbs steeply with the narrow sigma (1.131 -> 1.227) while the
+ * mid-scale gain it is actually there for barely moves (1.215 -> 1.247). So
+ * stay near the bottom: 0.75% keeps almost all the mid gain for a third of the
+ * bleed at 2%. */
+var CTD_WIDE_FRAC = 0.035;
+var CTD_NARROW_FRAC = 0.0075;
 
 function ensureCtdTargets(w, h) {
   var pw = Math.max(8, Math.ceil(w / CTD_DIV)), ph = Math.max(8, Math.ceil(h / CTD_DIV));
@@ -3379,8 +3614,8 @@ function computeCtd() {
   gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
 
   // 2. The two blurs. Sigmas are the reference's, expressed at pyramid scale.
-  blurPyr(ctdP[0].tex, ctdP[1], ctdP[3], maxDim * 0.04 / CTD_DIV, pw, ph);
-  blurPyr(ctdP[0].tex, ctdP[2], ctdP[3], maxDim * 0.01 / CTD_DIV, pw, ph);
+  blurPyr(ctdP[0].tex, ctdP[1], ctdP[3], maxDim * CTD_WIDE_FRAC / CTD_DIV, pw, ph);
+  blurPyr(ctdP[0].tex, ctdP[2], ctdP[3], maxDim * CTD_NARROW_FRAC / CTD_DIV, pw, ph);
 
   // 3. Dark channel, only when dehaze is actually asking for one.
   var atmos = 0.5;
@@ -3491,12 +3726,274 @@ function computeSharpen() {
   shActiveTex = shT.tex;
   shSig = sig;
 }
-// The texture the grade samples: the sharpened one when sharpening is active
-// (and was built over the source this side is showing), else the denoise/face
-// chain output.
-function gradeSrcTex() {
+// Input to halation: the sharpen chain output.
+function halSrcTex() {
   if (shActiveTex && sharpSrcTex() === shSrcAtBuild) return shActiveTex;
   return sharpSrcTex();
+}
+
+/* ---- Halation ---------------------------------------------------------------
+ * Light that made it through the emulsion, reflected off the back of the film
+ * base and came back up to expose it a second time, in a ring around every
+ * bright source - the red-orange bleed of a stock shot without its
+ * anti-halation backing.
+ *
+ * It is NOT a glow. A gaussian bloom has its maximum ON the highlight; real
+ * halation has a rim standing OFF it at a radius set by the base thickness,
+ * because the inner disk is suppressed by Fresnel reflectance (~4%) while
+ * everything past the critical angle comes back at full strength. That step is
+ * the whole effect, and reproducing it is what the ring pass below is for.
+ *
+ * Placed LAST in the image-space chain, after sharpen. Physically it belongs at
+ * capture, before everything - but dehaze exists to remove precisely this kind
+ * of veiling, so running halation first would mean one slider quietly undoing
+ * another. Added last, it behaves the way a colourist would use it.
+ *
+ * Derived here from the geometry, not fitted: a Lambertian scatter into a slab
+ * of index n, reflected at the rear face, gives the annulus in closed form
+ * (halPtir), and the same Fresnel term integrated over the hemisphere gives how
+ * much comes back at all (HAL_RETURN). Two numbers are stated rather than
+ * derived and both are marked where they appear: the 2:1 blue-to-green optical
+ * depth in halWeights, which is a layer count, and n = 1.5 for the base. */
+var halT = null, halP = [null, null, null, null, null, null], halSig = '';
+var halActiveTex = null, halSrcAtBuild = null, halTargW = 0;
+var HAL_N_BASE = 1.5;
+var HAL_RINGS = 12;          // annuli in the quadrature
+// Angular samples on the widest annulus. A ring near the top of the radius
+// range needs more of them or the taps stand far enough apart to read as spokes
+// off a hard specular; the pyramid is smaller at those settings anyway, so the
+// extra taps cost nothing that the smaller pass has not already saved.
+var HAL_MAX_ANG = 48;
+/* The pyramid is sized so the ring always spans this many pyramid pixels, which
+ * holds the tap count constant whatever the slider says. It also sets how badly
+ * the ring is smeared: the cell scales with the ring, so the blur it adds is a
+ * fixed FRACTION of r_c, and a symmetric blur pushes the radial peak of an
+ * annulus outward by about sigma^2/r_c. At 4 px that measured as a flat +19%
+ * across an 8x range of radii. At 8 px the same term is four times smaller and
+ * the ring lands where the slider says, for four times the pyramid area - which
+ * is 1.5 ms against 0.3 ms, so it is not a real cost. */
+var HAL_RC_PYR = 8.0;
+// Fitted once to exp(-r/L)/L, the tail's energy per unit radius. Scale-free, so
+// the same three numbers hold for any tail length. Relative rms 0.274, and no
+// negative lobe anywhere - the tail stays a tail.
+var HAL_TAIL_SIG = [0.12, 0.55, 2.2];
+var HAL_TAIL_C = [0.166, 0.509, 0.325];
+/* Halo colour, derived rather than tabulated.
+ *
+ * The returning light crosses the layers above the reflection twice. In colour
+ * negative those sit blue-sensitive on top, then the yellow filter, then green,
+ * then red - so red passes almost freely, green is absorbed once, and blue is
+ * absorbed by its own layer AND by the yellow filter under it. Take the green
+ * layer's optical depth as the unit and blue as twice it, put both through
+ * Beer-Lambert over the double pass, and the whole family collapses to one
+ * number:
+ *
+ *     w = [1, exp(-k), exp(-2k)]
+ *
+ * k = 0 is a clear base (a neutral halo, what an old panchromatic plate does);
+ * k around 1.1 is the deep red-orange of a stock with the anti-halation backing
+ * stripped. One control spanning a continuum, instead of three fixed triplets
+ * with nothing in between them.
+ *
+ * What is derived here is the ORDERING w_R > w_G > w_B and the exponential
+ * shape. The 2:1 blue-to-green depth ratio is a layer count, not a measurement -
+ * real dye densities would need spectra this project does not have. */
+function halWeights(k) {
+  return [1, Math.exp(-k), Math.exp(-2 * k)];
+}
+
+/* The share of downward-scattered light that actually comes back up, integrated
+ * over the Lambertian hemisphere with the same Fresnel term the kernel uses:
+ *
+ *     f = integral R(theta) * 2 cos(theta) sin(theta) dtheta,  0 .. pi/2
+ *
+ * Everything past the critical angle returns whole, which is why this is large:
+ * 1 - 1/n^2 = 0.556 from total internal reflection alone, plus a few per cent
+ * of Fresnel leak below it. This is the physical ceiling on the strength
+ * slider - the number comes out of the model rather than being chosen, so the
+ * top of the slider means "as much as the geometry can give", not a taste cap. */
+var HAL_RETURN = (function () {
+  var s = 0, N = 2000;
+  for (var i = 0; i < N; i++) {
+    var th = (i + 0.5) * (Math.PI / 2) / N;
+    s += halFresnel(th) * 2 * Math.cos(th) * Math.sin(th) * (Math.PI / 2) / N;
+  }
+  return s;
+})();
+
+// Unpolarized Fresnel reflectance, base -> air. Jumps to 1 past the critical
+// angle; that jump is what puts a rim on the kernel.
+function halFresnel(theta) {
+  var n = HAL_N_BASE, s = n * Math.sin(theta);
+  if (s >= 1) return 1;
+  var ci = Math.cos(theta), ct = Math.sqrt(1 - s * s);
+  var rs = (n * ci - ct) / (n * ci + ct);
+  var rp = (n * ct - ci) / (n * ct + ci);
+  return (rs * rs + rp * rp) * 0.5;
+}
+// P_TIR(r) = R(theta(r)) / (1 + (r/2d)^2)^2, with 2d fixed by the ring radius.
+function halPtir(r, rc) {
+  var t = r / (rc * Math.sqrt(HAL_N_BASE * HAL_N_BASE - 1));
+  var q = 1 + t * t;
+  return halFresnel(Math.atan(t)) / (q * q);
+}
+/* Ring taps: annulus edges bunched toward the rim (u^1.6), each annulus'
+ * energy integrated finely enough not to step over the discontinuity, then
+ * split evenly over its angular samples. Normalised to unit energy, so the
+ * strength slider means what it says. */
+function halRingTaps(rcPyr) {
+  var rMax = rcPyr * 5, taps = [], total = 0, j, k;
+  var edge = [];
+  for (j = 0; j <= HAL_RINGS; j++) edge.push(rMax * Math.pow(j / HAL_RINGS, 1.6));
+  // Force a panel boundary onto r_c. The profile JUMPS there, and a quadrature
+  // panel that straddles a discontinuity smears it: measured on an impulse, the
+  // ring landed at 19 px against a predicted 16 with the plain grid, because the
+  // rim's mass was averaged in with the suppressed disk just inside it.
+  edge.push(rcPyr);
+  edge.sort(function (a, b) { return a - b; });
+  for (j = 0; j < edge.length - 1; j++) {
+    var r0 = edge[j], r1 = edge[j + 1];
+    if (r1 <= r0) continue;
+    // Energy of the annulus, and the radius that energy actually sits at. The
+    // midpoint is the obvious choice and it is wrong: the profile jumps inside
+    // the annulus that straddles the rim, so its mass is not centred. Measured,
+    // the midpoint put the ring 12% wide of r_c on an impulse.
+    var e = 0, mom = 0, S = 24, d = (r1 - r0) / S;
+    for (k = 0; k < S; k++) {
+      var rr = r0 + (k + 0.5) * d;
+      var q = halPtir(rr, rcPyr) * 2 * Math.PI * rr * d;
+      e += q; mom += q * rr;
+    }
+    if (e <= 0) continue;
+    var rm = mom / e;
+    var m = Math.max(6, Math.min(HAL_MAX_ANG, Math.round(2.2 * rm)));
+    taps.push([rm, m, e / m]);
+    total += e;
+  }
+  if (total > 1e-12) taps.forEach(function (t) { t[2] /= total; });
+  return taps;
+}
+
+function halationActive() {
+  var p = state.params;
+  return !!(state.tex && halApplyProg && dnFloatOK && groupEnabled.Halation &&
+    (p.halation || 0) >= 1 && (p.halAh || 0) < 100);
+}
+
+function ensureHalTargets(w, h, div) {
+  var pw = Math.max(8, Math.ceil(w / div)), ph = Math.max(8, Math.ceil(h / div));
+  if (halT && halT.w === w && halT.h === h && halP[0] && halP[0].w === pw && halP[0].h === ph) return true;
+  if (halT) { gl.deleteTexture(halT.tex); gl.deleteFramebuffer(halT.fb); }
+  halP.forEach(function (t) { if (t) { gl.deleteTexture(t.tex); gl.deleteFramebuffer(t.fb); } });
+  halT = makeDnTarget(w, h);
+  for (var i = 0; i < 6; i++) halP[i] = makeDnTarget(pw, ph);
+  halSig = '';
+  return !!(halT && halP[0] && halP[1] && halP[2] && halP[3] && halP[4] && halP[5]);
+}
+
+function computeHalation() {
+  halActiveTex = null;
+  if (!gl || !halationActive()) return;
+  var w = state.texW, h = state.texH;
+  var p = state.params;
+  // Both radii are a percentage of the long edge, so the look survives a resize.
+  var maxDim = Math.max(w, h);
+  var rcFull = Math.max(1, (p.halRing == null ? 0.8 : p.halRing) / 100 * maxDim);
+  var lFull = Math.max(1, (p.halTail == null ? 4 : p.halTail) / 100 * maxDim);
+  // The pyramid is chosen so the ring always spans about the same number of
+  // pyramid pixels. That holds the tap count and the ring's sharpness constant
+  // across image sizes and slider settings, instead of letting a wide ring turn
+  // into a very expensive pass.
+  var div = Math.max(4, Math.min(32, Math.round(rcFull / HAL_RC_PYR)));
+  if (!ensureHalTargets(w, h, div)) return;
+  var src = halSrcTex();
+  halSrcAtBuild = src;
+  var sig = [state.texGen, w, h, p.halation, p.halKnee, p.halWarm, p.halRing,
+    p.halTail, p.halBal, p.halAh, p.sharpness, p.clarity, p.texture, p.dehaze,
+    p.nrLuma, p.nrColor, faceDnKey()].join(':');
+  if (sig === halSig) { halActiveTex = halT.tex; return; }
+
+  var pw = halP[0].w, ph = halP[0].h;
+  var rcPyr = rcFull / div, lPyr = lFull / div;
+  gl.disable(gl.SCISSOR_TEST);
+  gl.disable(gl.BLEND);
+
+  // 1. Pyramid + highlight extraction.
+  gl.useProgram(halDownProg);
+  gl.viewport(0, 0, pw, ph);
+  gl.uniform2f(halDownUni.texel, 1 / w, 1 / h);
+  gl.uniform1f(halDownUni.div, div);
+  gl.uniform1f(halDownUni.knee, Math.min(0.95, (p.halKnee || 0) / 100));
+  gl.bindFramebuffer(gl.FRAMEBUFFER, halP[0].fb);
+  gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, src);
+  gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+
+  // 2. Ring, by polar quadrature of the exact profile.
+  var taps = halRingTaps(rcPyr);
+  var flat = new Float32Array(16 * 3);
+  for (var i = 0; i < taps.length && i < 16; i++) {
+    flat[i * 3] = taps[i][0]; flat[i * 3 + 1] = taps[i][1]; flat[i * 3 + 2] = taps[i][2];
+  }
+  gl.useProgram(halRingProg);
+  gl.uniform2f(halRingUni.texel, 1 / pw, 1 / ph);
+  gl.uniform1i(halRingUni.rings, Math.min(16, taps.length));
+  gl.uniform3fv(halRingUni.ring, flat);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, halP[1].fb);
+  gl.bindTexture(gl.TEXTURE_2D, halP[0].tex);
+  gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+
+  // 3. Tail, as a cascade: each blur continues the previous one, so three
+  //    widths cost three blurs rather than three independent ones (gaussians
+  //    compose, sigma adds in quadrature).
+  gl.useProgram(halBlurProg);
+  var prev = halP[0], sigPrev = 0, dst = [halP[2], halP[3], halP[4]];
+  for (i = 0; i < 3; i++) {
+    var want = Math.max(0.4, HAL_TAIL_SIG[i] * lPyr);
+    var stepSig = Math.sqrt(Math.max(want * want - sigPrev * sigPrev, 0.16));
+    gl.uniform1f(halBlurUni.sigma, stepSig);
+    gl.uniform2f(halBlurUni.step, 1 / pw, 0);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, halP[5].fb);
+    gl.bindTexture(gl.TEXTURE_2D, prev.tex);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    gl.uniform2f(halBlurUni.step, 0, 1 / ph);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, dst[i].fb);
+    gl.bindTexture(gl.TEXTURE_2D, halP[5].tex);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    sigPrev = want;
+    prev = dst[i];
+  }
+
+  // 4. Composite at full resolution. The anti-halation layer absorbs on the way
+  //    down AND on the way back up, hence the square. Full strength is HAL_RETURN,
+  //    the share the geometry actually sends back, so the top of the slider is
+  //    the physical ceiling rather than a number picked to look reasonable.
+  var ah = Math.min(1, Math.max(0, (p.halAh || 0) / 100));
+  var halo = halWeights((p.halWarm == null ? 115 : p.halWarm) / 100);
+  gl.useProgram(halApplyProg);
+  gl.viewport(0, 0, w, h);
+  gl.uniform3f(halApplyUni.tailC, HAL_TAIL_C[0], HAL_TAIL_C[1], HAL_TAIL_C[2]);
+  gl.uniform3f(halApplyUni.halo, halo[0], halo[1], halo[2]);
+  gl.uniform1f(halApplyUni.amt, (p.halation || 0) / 100 * HAL_RETURN * (1 - ah) * (1 - ah));
+  gl.uniform1f(halApplyUni.bal, Math.min(1, Math.max(0, (p.halBal == null ? 65 : p.halBal) / 100)));
+  gl.bindFramebuffer(gl.FRAMEBUFFER, halT.fb);
+  gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, src);
+  gl.activeTexture(gl.TEXTURE6); gl.bindTexture(gl.TEXTURE_2D, halP[1].tex);
+  gl.activeTexture(gl.TEXTURE7); gl.bindTexture(gl.TEXTURE_2D, halP[2].tex);
+  gl.activeTexture(gl.TEXTURE8); gl.bindTexture(gl.TEXTURE_2D, halP[3].tex);
+  gl.activeTexture(gl.TEXTURE9); gl.bindTexture(gl.TEXTURE_2D, halP[4].tex);
+  gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+  gl.activeTexture(gl.TEXTURE0);
+
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  halActiveTex = halT.tex;
+  halSig = sig;
+}
+
+// The texture the grade samples: halation when it is live over the source this
+// side is showing, else the sharpen/denoise/face chain output.
+function gradeSrcTex() {
+  if (halActiveTex && halSrcTex() === halSrcAtBuild) return halActiveTex;
+  return halSrcTex();
 }
 
 function drawQuad(vpW, vpH, angleDeg, flipY, letterbox, zoom, pan, crop, effects) {
@@ -3813,7 +4310,7 @@ function render() {
   resizeCanvas();
   computeFace();      // refresh the face-baked base (Smile Detect) if its params changed
   computeDenoise();   // refresh the denoised source texture if denoise params changed
-  computeCtd(); computeSharpen();   // ... then local contrast + sharpen, same cache contract
+  computeCtd(); computeSharpen(); computeHalation();   // ... then local contrast + sharpen, same cache contract
   // While the crop tool is active, show the whole image at fit (the crop
   // rectangle is an HTML overlay); otherwise render the committed crop.
   var activeCrop = state.cropping ? FULL_CROP : state.crop;
@@ -4028,7 +4525,7 @@ function autoSample() {
   var h = ar >= 1 ? Math.round(AUTO_MAX / ar) : AUTO_MAX;
   w = Math.max(16, Math.min(AUTO_MAX, w));
   h = Math.max(16, Math.min(AUTO_MAX, h));
-  computeFace(); computeDenoise(); computeCtd(); computeSharpen();   // sample the same source the grade reads
+  computeFace(); computeDenoise(); computeCtd(); computeSharpen(); computeHalation();   // sample the same source the grade reads
   gl.bindFramebuffer(gl.FRAMEBUFFER, autoFB.fbo);
   gl.disable(gl.SCISSOR_TEST);
   gl.disable(gl.BLEND);
@@ -4918,7 +5415,7 @@ async function applyFullRes(want) {
 /* Slider construction */
 var sliderInputs = {};
 // Per-group bypass (eye toggle). A disabled group renders its params at default.
-var groupEnabled = { Light: true, Color: true, Detail: true, Effects: true, Denoise: true, Grain: true, LUT: true, Face: true };
+var groupEnabled = { Light: true, Color: true, Detail: true, Effects: true, Halation: true, Denoise: true, Grain: true, LUT: true, Face: true };
 var eyeSyncs = [];        // per-eye refresh fns, so undo/redo can resync every eye button
 var PARAM_GROUP = {}, PARAM_DEF = {}, PARAM_LABEL = {};
 var groupTitleEls = {};   // group name -> its title <span> (for the A/B "changed" marker)
@@ -4997,7 +5494,7 @@ function addDoubleTapReset(el, cb) {
   });
 }
 
-var SLIDER_GROUPS_CLOSED = ['Effects', 'Denoise'];
+var SLIDER_GROUPS_CLOSED = ['Effects', 'Halation', 'Denoise'];
 
 function buildSliders() {
   var container = document.getElementById('slidergroups');
@@ -6274,7 +6771,7 @@ function renderExportCanvas() {
 
   computeFace();      // bake Smile Detect into the export at its native resolution
   computeDenoise();   // bake denoise into the export at its native resolution
-  computeCtd(); computeSharpen();   // ... and the same detail passes the preview ran
+  computeCtd(); computeSharpen(); computeHalation();   // ... and the same detail passes the preview ran
 
   var tex = gl.createTexture();
   gl.bindTexture(gl.TEXTURE_2D, tex);

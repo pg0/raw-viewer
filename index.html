@@ -364,6 +364,12 @@
   .grpauto:hover:not(:disabled) { background: #3d3d3d; border-color: #7a6237; color: #e6a94e; }
   .grpauto:active:not(:disabled) { background: #2b2b2b; }
   .grpauto:disabled { opacity: .45; cursor: default; }
+  /* Latched on: this group re-solves itself on every image that loads, so it has
+     to read as a state, not as a button that was clicked a moment ago. */
+  .grpauto.on {
+    background: #6b5220; border-color: #e6a94e; color: #ffd79a;
+  }
+  .grpauto.on:hover { background: #7d5f26; }
   .grpauto + .grpreset { margin-left: 0; }
 
   .togglerow {
@@ -4563,30 +4569,120 @@ var AUTO_GROUPS = {
     'Reads the current Light settings, so re-press it after running Auto Light.' }
 };
 
+/* AUTO is a latch, not a one-shot. Left as a button it had to be re-pressed for
+ * every frame, which is the wrong shape for the way these get used - you decide
+ * once that this batch wants auto tone, then you want it re-solved per image,
+ * because the answer is per image. On means "keep solving this group"; the state
+ * survives image loads and sessions. */
+var autoOn = { Light: false, Color: false };
+var autoBtns = {};
+var AUTO_ON_KEY = 'rawviewer.autoOn';
+
+function autoOnLoad() {
+  try {
+    var raw = localStorage.getItem(AUTO_ON_KEY);
+    if (!raw) return;
+    var v = JSON.parse(raw);
+    Object.keys(autoOn).forEach(function (g) { autoOn[g] = !!v[g]; });
+  } catch (e) { /* corrupt or unavailable storage is not worth a message */ }
+}
+function autoOnSave() {
+  try { localStorage.setItem(AUTO_ON_KEY, JSON.stringify(autoOn)); } catch (e) {}
+}
+function autoSyncBtn(groupName) {
+  var b = autoBtns[groupName];
+  if (!b) return;
+  var on = !!autoOn[groupName];
+  b.classList.toggle('on', on);
+  b.setAttribute('aria-pressed', on ? 'true' : 'false');
+  b.title = AUTO_GROUPS[groupName].title +
+    (on ? '\n\nON - re-solved automatically on every image you load. Click to turn off.'
+        : '\n\nOFF - click to solve now and keep solving on every image you load.');
+}
+
+/* Solve one group and write it. Returns a short status string, or '' when there
+ * was nothing to say. `quiet` suppresses the per-image chatter on auto-runs -
+ * a toast per group per image would be unbearable in a batch. */
+function autoRunGroup(groupName, quiet) {
+  var spec = AUTO_GROUPS[groupName];
+  if (!state.tex) return '';
+  var s = autoSample();
+  if (!s) return quiet ? '' : 'Auto ' + groupName + ': nothing to measure.';
+  var vals = spec.solve(s);
+  if (!vals) return quiet ? '' : 'Auto ' + groupName + ': not enough usable pixels to measure.';
+  if (vals.bail) {
+    return quiet ? '' : 'Auto Color: no neutral reference in frame - the cast looks ' +
+      'intentional. Sliders left untouched.';
+  }
+  var changed = acApply(groupName, vals);
+  if (quiet) return '';
+  return changed.length
+    ? 'Auto ' + groupName + ': ' + changed.join(', ')
+    : 'Auto ' + groupName + ': already balanced, nothing to change.';
+}
+
+/* Run every latched group on a freshly loaded image. Light first: Auto Color
+ * measures saturation through the current exposure and contrast, so the order
+ * is not cosmetic. */
+function autoRunLatched() {
+  if (!state.tex) return;
+  var ran = [];
+  ['Light', 'Color'].forEach(function (g) {
+    if (!autoOn[g]) return;
+    autoRunGroup(g, true);
+    ran.push(g);
+  });
+  if (ran.length) toast('Auto ' + ran.join(' + ') + ' applied.');
+}
+
+// Put one group's sliders back to their defaults. Shared by the reset button
+// and by switching AUTO off.
+function resetGroup(groupName) {
+  var grp = null;
+  SLIDER_GROUPS.forEach(function (g) { if (g.group === groupName) grp = g; });
+  if (!grp) return;
+  if (typeof captureAbBefore === 'function') captureAbBefore();
+  grp.items.forEach(function (item) {
+    var s = sliderInputs[item.id];
+    if (!s) return;
+    s.input.value = item.def;
+    state.params[item.id] = item.def;
+    s.refresh();
+  });
+  // Grain defaults match no film stock, so drop the preset back to Custom.
+  if (groupName === 'Grain') {
+    state.grainStock = 'custom';
+    if (grainStockSelect) grainStockSelect.value = 'custom';
+  }
+  requestRender();
+}
+
 function makeGroupAuto(groupName) {
   var spec = AUTO_GROUPS[groupName];
   var b = document.createElement('button');
   b.type = 'button';
   b.className = 'grpauto';
   b.textContent = 'AUTO';
-  b.title = spec.title;
+  autoBtns[groupName] = b;
+  autoSyncBtn(groupName);
   b.addEventListener('click', function (e) {
     e.preventDefault();
     e.stopPropagation();   // do not toggle the <details> open state
-    if (!state.tex) return;
-    var s = autoSample();
-    if (!s) { toast('Auto ' + groupName + ': nothing to measure.'); return; }
-    var vals = spec.solve(s);
-    if (!vals) { toast('Auto ' + groupName + ': not enough usable pixels to measure.'); return; }
-    if (vals.bail) {
-      toast('Auto Color: no neutral reference in frame - the cast looks intentional. ' +
-            'Sliders left untouched.');
+    var turningOn = !autoOn[groupName];
+    autoOn[groupName] = turningOn;
+    autoOnSave();
+    autoSyncBtn(groupName);
+    if (!turningOn) {
+      // Switching off stops future solves and puts the group back where it was
+      // before auto touched it. Leaving machine-chosen numbers behind under an
+      // OFF button is the confusing half-state.
+      resetGroup(groupName);
+      toast('Auto ' + groupName + ' off - group reset.');
       return;
     }
-    var changed = acApply(groupName, vals);
-    toast(changed.length
-      ? 'Auto ' + groupName + ': ' + changed.join(', ')
-      : 'Auto ' + groupName + ': already balanced, nothing to change.');
+    if (!state.tex) { toast('Auto ' + groupName + ' on - applies when you load an image.'); return; }
+    var msg = autoRunGroup(groupName, false);
+    if (msg) toast(msg);
   });
   return b;
 }
@@ -4812,20 +4908,13 @@ function buildSliders() {
     h.appendChild(stxt);
     if (AUTO_GROUPS[grp.group]) h.appendChild(makeGroupAuto(grp.group));
     h.appendChild(makeGroupReset(grp.group, function () {
-      if (typeof captureAbBefore === 'function') captureAbBefore();
-      grp.items.forEach(function (item) {
-        var s = sliderInputs[item.id];
-        if (!s) return;
-        s.input.value = item.def;
-        state.params[item.id] = item.def;
-        s.refresh();
-      });
-      // Grain defaults match no film stock, so drop the preset back to Custom.
-      if (grp.group === 'Grain') {
-        state.grainStock = 'custom';
-        if (grainStockSelect) grainStockSelect.value = 'custom';
+      // A manual reset is also a statement that auto is not wanted here.
+      if (autoOn[grp.group]) {
+        autoOn[grp.group] = false;
+        autoOnSave();
+        autoSyncBtn(grp.group);
       }
-      requestRender();
+      resetGroup(grp.group);
     }));
     panel.appendChild(h);
     grp.items.forEach(function (item) {
@@ -4920,6 +5009,7 @@ function buildSliders() {
     container.appendChild(panel);
   });
 }
+autoOnLoad();   // latch state must be known before the AUTO buttons are built
 buildSliders();
 
 // Smile Detect is markup, not a generated slider group, so it is moved into
@@ -5400,6 +5490,10 @@ async function loadRasterImage(file) {
     state.fullRes = false;
     updateTopbarChips();   // chk.disabled just changed -> hide the RAW pill
     requestRender();
+    // Same per-image work the RAW path does: the contrast pivot and any latched
+    // AUTO group are properties of the picture, not of how it was decoded.
+    if (typeof measureContrastPivot === 'function') measureContrastPivot();
+    if (typeof autoRunLatched === 'function') autoRunLatched();
   } catch (e2) {
     toast('Could not process image: ' + excerpt(e2.message || e2));
     if (!state.tex) dropzone.classList.remove('hidden');
@@ -5508,6 +5602,9 @@ async function loadFile(file) {
   }
   if (ok) applyCameraAspect(metaText);
   if (ok && typeof measureContrastPivot === 'function') measureContrastPivot();
+  // Latched AUTO groups re-solve here: the answer is per image, so it has to be
+  // recomputed per image rather than carried over from the last one.
+  if (ok && typeof autoRunLatched === 'function') autoRunLatched();
   } finally {
     state.busy = false;
   }

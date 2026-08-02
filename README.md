@@ -28,6 +28,7 @@ Double-clicking `index.html` also works, but you get the 2016 decoder and no fac
 
 - **Opens your files.** RAW from 1000+ cameras, plus JPEG, PNG, WebP, HEIC, TIFF, BMP, GIF.
 - **Grades live on the GPU.** Exposure, contrast, highlights, shadows, white balance, saturation, vibrance, sharpness, denoise.
+- **Halates.** The red-orange ring film gets around a bright light. Four presets, then Amount, Halo size and Warmth.
 - **Takes two LUTs.** One for the conversion, one for the look. Own intensity each. Any `.cube` file.
 - **Adds film grain.** Pick Super 8, 16mm, 35mm or 65mm. Scales with resolution, so 12MP and 60MP match.
 - **Stacks layers.** Images, SVGs, text, emoji. Blend modes, tiling, chroma-key, drag to place.
@@ -93,6 +94,7 @@ The MediaPipe models sit in `face/`, about 72 MB total (face landmarker, pose, h
 WebGL2 fragment shaders on the decoded image. Sliders are live. Denoise and sharpness run as cached full-resolution passes after them, and the export runs the same passes.
 
 - **Sharpness** - contrast-adaptive unsharp mask on luma, gain reduced near high contrast and clipping, clamped to the local min/max. Luma only, so no colour fringing.
+- **Halation** - light that got through the emulsion, bounced off the back of the film base and exposed it a second time from behind. Not a bloom: the ring stands off the highlight instead of peaking on it, because the inner disk is suppressed by Fresnel reflectance while everything past the critical angle comes back whole. Sampled as a polar quadrature of that profile, with the diffuse veil as a separate gaussian cascade.
 - **Grain** - additive, luma-weighted, band-limited Perlin noise with particle shaping, normalized to resolution, anchored to the image.
 - **LUTs** - two `.cube` slots with per-slot intensity.
 

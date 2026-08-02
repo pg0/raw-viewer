@@ -1524,6 +1524,17 @@ var SLIDER_GROUPS = [
     { id: 'vibrance',    label: 'Vibrance',    min: -1, max: 1, step: 0.01, def: 0 },
     { id: 'saturation',  label: 'Saturation',  min: -1, max: 1, step: 0.01, def: 0 }
   ]},
+  { group: 'Detail', items: [
+    // Mid-frequency local contrast, run as image-space passes before the grade -
+    // see computeCtd(). All three work on luminance and put the result back as a
+    // per-channel ratio, so none of them can shift a hue.
+    { id: 'clarity', label: 'Clarity', min: -100, max: 100, step: 1, def: 0,
+      fmt: function (v) { return v.toFixed(0); } },
+    { id: 'texture', label: 'Texture', min: -100, max: 100, step: 1, def: 0,
+      fmt: function (v) { return v.toFixed(0); } },
+    { id: 'dehaze',  label: 'Dehaze',  min: -100, max: 100, step: 1, def: 0,
+      fmt: function (v) { return v.toFixed(0); } }
+  ]},
   { group: 'Effects', items: [
     // Sharpness is a pre-grade image-space pass (like denoise), not a `prog`
     // uniform - see computeSharpen(). Judge it at 100% zoom.
@@ -2009,6 +2020,167 @@ var DN_COMBINE_FRAG = [
  *   bought only 38% more effect), so the slider opens it up as it climbs.
  *
  * Noise coring below 0.4% is fixed and not exposed - one slider, one variable. */
+/* Clarity / Texture / Dehaze - three mid-frequency contrast tools, ported from
+ * ComfyUI-Darkroom's clarity_texture_dehaze node and rebuilt for the GPU.
+ *
+ * All three are unsharp masks at different scales, and the scales are what make
+ * them different tools:
+ *
+ *   clarity   detail against a very large blur (sigma = 4% of the long edge).
+ *             Midtone punch - the thing that reads as "depth" and is most of
+ *             what separates a finished photo from a flat raw render.
+ *   texture   a BAND between a 1px blur and a 1% blur, so it lifts fine detail
+ *             without touching either grain or the large shapes clarity owns.
+ *   dehaze    dark channel prior. Haze lifts the darkest channel of every patch
+ *             off zero; measuring that floor gives a transmission map, and
+ *             dividing it out pulls the contrast back.
+ *
+ * The blurs run on a 1/8 pyramid. A 4%-of-frame sigma is ~85px at full size, and
+ * nobody can afford that kernel per pixel - but a large blur has no high
+ * frequencies left in it by definition, so computing it small and letting the
+ * bilinear upsample carry it back is exact where it matters and free where it
+ * is not. Same argument for the dark channel's minimum filter.
+ *
+ * Luminance only, reapplied as a ratio: an unsharp mask on RGB pulls the
+ * channels apart at every edge, which is where the coloured fringing in naive
+ * clarity implementations comes from. */
+var CTD_DOWN_FRAG = [
+  '#version 300 es',
+  'precision highp float;',
+  'in vec2 v_uv;',
+  'out vec4 frag;',
+  'uniform sampler2D u_src;',
+  'uniform vec2 u_texel;',      // texel size of the SOURCE
+  'const vec3 LW = vec3(0.2126, 0.7152, 0.0722);',
+  'void main() {',
+  // 4x4 box on the source: with an 8x reduction this keeps the pyramid from
+  // aliasing on fine texture, which would otherwise crawl as the image moves.
+  '  float s = 0.0;',
+  '  for (int j = -2; j <= 1; j++) {',
+  '    for (int i = -2; i <= 1; i++) {',
+  '      vec3 c = texture(u_src, v_uv + vec2(float(i) + 0.5, float(j) + 0.5) * u_texel * 4.0).rgb;',
+  '      s += max(dot(c, LW), 0.0);',
+  '    }',
+  '  }',
+  '  s *= 1.0 / 16.0;',
+  // r = luma, g = darkest channel (the dark-channel prior's input). Both stored
+  // perceptually encoded - see the note on the apply pass.
+  '  vec3 c0 = texture(u_src, v_uv).rgb;',
+  '  float dark = max(min(min(c0.r, c0.g), c0.b), 0.0);',
+  '  frag = vec4(pow(s, 1.0 / 2.4), pow(dark, 1.0 / 2.4), 0.0, 1.0);',
+  '}'
+].join('\n');
+
+// Separable Gaussian on the pyramid. Radius is driven from the uniform so the
+// same program serves clarity's wide blur and texture's narrow one.
+var CTD_BLUR_FRAG = [
+  '#version 300 es',
+  'precision highp float;',
+  'in vec2 v_uv;',
+  'out vec4 frag;',
+  'uniform sampler2D u_src;',
+  'uniform vec2 u_step;',       // texel offset along the axis being blurred
+  'uniform float u_sigma;',
+  'void main() {',
+  '  float sig = max(u_sigma, 0.35);',
+  '  int rad = int(min(ceil(sig * 2.5), 24.0));',
+  '  float inv = 1.0 / (2.0 * sig * sig);',
+  '  vec2 acc = vec2(0.0);',
+  '  float wsum = 0.0;',
+  '  for (int i = -24; i <= 24; i++) {',
+  '    if (i < -rad || i > rad) continue;',
+  '    float w = exp(-float(i * i) * inv);',
+  '    acc += texture(u_src, v_uv + u_step * float(i)).rg * w;',
+  '    wsum += w;',
+  '  }',
+  '  frag = vec4(acc / wsum, 0.0, 1.0);',
+  '}'
+].join('\n');
+
+// Separable minimum filter -> dark channel. Same trick as the blur: run it on
+// the pyramid, where the patch radius is small enough to be affordable.
+var CTD_MIN_FRAG = [
+  '#version 300 es',
+  'precision highp float;',
+  'in vec2 v_uv;',
+  'out vec4 frag;',
+  'uniform sampler2D u_src;',
+  'uniform vec2 u_step;',
+  'uniform float u_rad;',
+  'void main() {',
+  '  int rad = int(min(u_rad, 16.0));',
+  '  vec4 c = texture(u_src, v_uv);',
+  '  float m = c.g;',
+  '  for (int i = -16; i <= 16; i++) {',
+  '    if (i < -rad || i > rad) continue;',
+  '    m = min(m, texture(u_src, v_uv + u_step * float(i)).g);',
+  '  }',
+  '  frag = vec4(c.r, m, 0.0, 1.0);',
+  '}'
+].join('\n');
+
+var CTD_APPLY_FRAG = [
+  '#version 300 es',
+  'precision highp float;',
+  'in vec2 v_uv;',
+  'out vec4 frag;',
+  'uniform sampler2D u_src;',      // full-res image
+  'uniform sampler2D u_wide;',     // pyramid: r = clarity blur luma
+  'uniform sampler2D u_narrow;',   // pyramid: r = texture large blur luma
+  'uniform sampler2D u_dark;',     // pyramid: g = dark channel
+  'uniform vec2 u_texel;',
+  'uniform float u_clarity, u_texture, u_dehaze;',
+  'uniform float u_atmos;',        // atmospheric light, solved on the CPU
+  'const vec3 LW = vec3(0.2126, 0.7152, 0.0722);',
+  'float enc(float v) { return pow(max(v, 0.0), 1.0 / 2.4); }',
+  /* Everything here runs on a perceptually encoded value, never on linear light.
+   * A symmetric high-pass in linear light is asymmetric to the eye - the bright
+   * side of an edge carries far larger numbers, so its overshoot dominates - and
+   * the dark channel prior is defined on display-referred data in the first
+   * place. Measured on the linear version of this pass, dehaze 70 pulled the
+   * frame mean down 41%, which is a tone crash, not haze removal. */
+  'void main() {',
+  '  vec3 c = texture(u_src, v_uv).rgb;',
+  '  float lum = max(dot(c, LW), 0.0);',
+  '  float ey = enc(lum);',
+  '  float add = 0.0;',
+  '  if (u_clarity != 0.0) {',
+  '    add += (ey - texture(u_wide, v_uv).r) * u_clarity;',
+  '  }',
+  '  if (u_texture != 0.0) {',
+  // The 1px end of texture's band, taken at full res where it actually lives.
+  '    float s = 0.0;',
+  '    s += enc(dot(texture(u_src, v_uv + vec2(-1.0, 0.0) * u_texel).rgb, LW));',
+  '    s += enc(dot(texture(u_src, v_uv + vec2( 1.0, 0.0) * u_texel).rgb, LW));',
+  '    s += enc(dot(texture(u_src, v_uv + vec2( 0.0,-1.0) * u_texel).rgb, LW));',
+  '    s += enc(dot(texture(u_src, v_uv + vec2( 0.0, 1.0) * u_texel).rgb, LW));',
+  '    float small = ey * 0.5 + s * 0.125;',
+  '    add += (small - texture(u_narrow, v_uv).r) * u_texture;',
+  '  }',
+  // Back to linear, and put the change in as a RATIO on the channels so the
+  // hue and saturation of every pixel survive untouched.
+  '  if (add != 0.0) {',
+  '    float yn = pow(max(ey + add, 0.0), 2.4);',
+  '    c *= yn / max(lum, 1e-5);',
+  '  }',
+  '  if (u_dehaze != 0.0) {',
+  '    vec3 e = pow(max(c, 0.0), vec3(1.0 / 2.4));',
+  '    float dc = texture(u_dark, v_uv).g;',
+  '    float A = clamp(u_atmos, 0.1, 1.0);',
+  '    if (u_dehaze > 0.0) {',
+  '      float t = clamp(1.0 - u_dehaze * (dc / A), 0.1, 1.0);',
+  '      e = (e - A) / t + A;',
+  '    } else {',
+  // Negative side adds haze: lift toward the atmospheric light, which is what
+  // haze physically does - it is not a contrast cut.
+  '      e = mix(e, vec3(A), -u_dehaze * 0.5);',
+  '    }',
+  '    c = pow(max(e, 0.0), vec3(2.4));',
+  '  }',
+  '  frag = vec4(max(c, 0.0), 1.0);',
+  '}'
+].join('\n');
+
 var SHARP_FRAG = [
   '#version 300 es',
   'precision highp float;',
@@ -2049,6 +2221,8 @@ var SHARP_FRAG = [
 ].join('\n');
 
 var dnProg = null, dnUni = {}, dncProg = null, dncUni = {}, shProg = null, shUni = {};
+var ctdDownProg = null, ctdDownUni = {}, ctdBlurProg = null, ctdBlurUni = {};
+var ctdMinProg = null, ctdMinUni = {}, ctdApplyProg = null, ctdApplyUni = {};
 
 /* ============================================================
  * Smile Detect face bake: a pre-grade pass on the linear source, like denoise.
@@ -2454,6 +2628,48 @@ function initGL() {
   gl.useProgram(shProg);
   gl.uniform1i(shUni.src, 0);
 
+  // Clarity / Texture / Dehaze: four small programs over the same quad.
+  ctdDownProg = linkQuadProg(CTD_DOWN_FRAG, 'CTD downsample');
+  ctdDownUni = {
+    src: gl.getUniformLocation(ctdDownProg, 'u_src'),
+    texel: gl.getUniformLocation(ctdDownProg, 'u_texel')
+  };
+  gl.useProgram(ctdDownProg); gl.uniform1i(ctdDownUni.src, 0);
+
+  ctdBlurProg = linkQuadProg(CTD_BLUR_FRAG, 'CTD blur');
+  ctdBlurUni = {
+    src: gl.getUniformLocation(ctdBlurProg, 'u_src'),
+    step: gl.getUniformLocation(ctdBlurProg, 'u_step'),
+    sigma: gl.getUniformLocation(ctdBlurProg, 'u_sigma')
+  };
+  gl.useProgram(ctdBlurProg); gl.uniform1i(ctdBlurUni.src, 0);
+
+  ctdMinProg = linkQuadProg(CTD_MIN_FRAG, 'CTD min');
+  ctdMinUni = {
+    src: gl.getUniformLocation(ctdMinProg, 'u_src'),
+    step: gl.getUniformLocation(ctdMinProg, 'u_step'),
+    rad: gl.getUniformLocation(ctdMinProg, 'u_rad')
+  };
+  gl.useProgram(ctdMinProg); gl.uniform1i(ctdMinUni.src, 0);
+
+  ctdApplyProg = linkQuadProg(CTD_APPLY_FRAG, 'CTD apply');
+  ctdApplyUni = {
+    src: gl.getUniformLocation(ctdApplyProg, 'u_src'),
+    wide: gl.getUniformLocation(ctdApplyProg, 'u_wide'),
+    narrow: gl.getUniformLocation(ctdApplyProg, 'u_narrow'),
+    dark: gl.getUniformLocation(ctdApplyProg, 'u_dark'),
+    texel: gl.getUniformLocation(ctdApplyProg, 'u_texel'),
+    clarity: gl.getUniformLocation(ctdApplyProg, 'u_clarity'),
+    texture: gl.getUniformLocation(ctdApplyProg, 'u_texture'),
+    dehaze: gl.getUniformLocation(ctdApplyProg, 'u_dehaze'),
+    atmos: gl.getUniformLocation(ctdApplyProg, 'u_atmos')
+  };
+  gl.useProgram(ctdApplyProg);
+  gl.uniform1i(ctdApplyUni.src, 0);
+  gl.uniform1i(ctdApplyUni.wide, 6);
+  gl.uniform1i(ctdApplyUni.narrow, 7);
+  gl.uniform1i(ctdApplyUni.dark, 8);
+
   // Smile Detect face bake program (shares the quad; src unit 0, donor unit 5).
   faceProg = gl.createProgram();
   gl.attachShader(faceProg, compileShader(gl.VERTEX_SHADER, DN_VERT));
@@ -2675,6 +2891,18 @@ function viewFit(vpAspect, angleDeg, crop, letterbox, flipY, zoom) {
  * a denoise-param (or image) change recomputes. gradeSrcTex() is the texture
  * the grade samples: the denoised one when active, else the raw source. */
 var dnA = null, dnB = null, dnSig = '', dnActiveTex = null;
+// Link a fragment shader against the shared full-quad vertex shader.
+function linkQuadProg(fragSrc, label) {
+  var p = gl.createProgram();
+  gl.attachShader(p, compileShader(gl.VERTEX_SHADER, DN_VERT));
+  gl.attachShader(p, compileShader(gl.FRAGMENT_SHADER, fragSrc));
+  gl.linkProgram(p);
+  if (!gl.getProgramParameter(p, gl.LINK_STATUS)) {
+    throw new Error(label + ' program: ' + gl.getProgramInfoLog(p));
+  }
+  return p;
+}
+
 function makeDnTarget(w, h) {
   var tex = gl.createTexture();
   gl.bindTexture(gl.TEXTURE_2D, tex);
@@ -2768,9 +2996,15 @@ function faceSrcTex() {
 // whose face source differs from that build must fall back to the un-denoised
 // source. This is also the input the sharpen pass reads.
 var dnSrcAtBuild = null;
-function sharpSrcTex() {
+// Input to Clarity/Texture/Dehaze: the denoise chain output.
+function ctdSrcTex() {
   if (dnActiveTex && faceSrcTex() === dnSrcAtBuild) return dnActiveTex;
   return faceSrcTex();
+}
+// Input to sharpen: the CTD output when it is live over the source we are on.
+function sharpSrcTex() {
+  if (ctdActiveTex && ctdSrcTex() === ctdSrcAtBuild) return ctdActiveTex;
+  return ctdSrcTex();
 }
 
 /* ---- Sharpen: one more full-res target, same cache-by-signature contract as
@@ -2778,6 +3012,137 @@ function sharpSrcTex() {
  * Allocated lazily - it is another w*h RGBA16F, and most edits never ask for
  * one. Deliberately image-space: the effect thins out on a zoomed-out preview
  * exactly as it does in every raw converter, and is judged at 100%. */
+/* Clarity / Texture / Dehaze pass. Sits between denoise and sharpen: it is a
+ * mid-frequency tool, so it wants noise already handled but must not be fed
+ * sharpening's own high-frequency overshoot. */
+var ctdT = null, ctdP = [null, null, null, null], ctdSig = '';
+var ctdActiveTex = null, ctdSrcAtBuild = null;
+var CTD_DIV = 8;
+
+function ensureCtdTargets(w, h) {
+  var pw = Math.max(8, Math.ceil(w / CTD_DIV)), ph = Math.max(8, Math.ceil(h / CTD_DIV));
+  if (ctdT && ctdT.w === w && ctdT.h === h && ctdP[0] && ctdP[0].w === pw) return true;
+  if (ctdT) { gl.deleteTexture(ctdT.tex); gl.deleteFramebuffer(ctdT.fb); }
+  ctdP.forEach(function (t) { if (t) { gl.deleteTexture(t.tex); gl.deleteFramebuffer(t.fb); } });
+  ctdT = makeDnTarget(w, h);
+  for (var i = 0; i < 4; i++) ctdP[i] = makeDnTarget(pw, ph);
+  ctdSig = '';
+  return !!(ctdT && ctdP[0] && ctdP[1] && ctdP[2] && ctdP[3]);
+}
+
+function ctdActive() {
+  var p = state.params;
+  return !!(state.tex && ctdApplyProg && dnFloatOK && groupEnabled.Detail &&
+    (Math.abs(p.clarity || 0) >= 1 || Math.abs(p.texture || 0) >= 1 ||
+     Math.abs(p.dehaze || 0) >= 1));
+}
+
+// Half the node's 0..100 range, matching the reference: 100 is a strong but
+// still photographic move, not a special effect.
+function ctdAmt(v) { return (v || 0) / 100 * 0.5; }
+
+function blurPyr(srcTex, dstT, tmpT, sigma, pw, ph) {
+  gl.useProgram(ctdBlurProg);
+  gl.uniform1f(ctdBlurUni.sigma, sigma);
+  gl.viewport(0, 0, pw, ph);
+  gl.uniform2f(ctdBlurUni.step, 1 / pw, 0);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, tmpT.fb);
+  gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, srcTex);
+  gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+  gl.uniform2f(ctdBlurUni.step, 0, 1 / ph);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, dstT.fb);
+  gl.bindTexture(gl.TEXTURE_2D, tmpT.tex);
+  gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+}
+
+function computeCtd() {
+  ctdActiveTex = null;
+  if (!gl || !ctdActive()) return;
+  var w = state.texW, h = state.texH;
+  if (!ensureCtdTargets(w, h)) return;
+  var p = state.params, src = ctdSrcTex();
+  ctdSrcAtBuild = src;
+  var sig = [state.texGen, w, h, p.clarity, p.texture, p.dehaze,
+    p.nrLuma, p.nrColor, faceDnKey()].join(':');
+  if (sig === ctdSig) { ctdActiveTex = ctdT.tex; return; }
+
+  var pw = ctdP[0].w, ph = ctdP[0].h, maxDim = Math.max(w, h);
+  gl.disable(gl.SCISSOR_TEST);
+  gl.disable(gl.BLEND);
+
+  // 1. Pyramid: luma in r, per-pixel darkest channel in g.
+  gl.useProgram(ctdDownProg);
+  gl.viewport(0, 0, pw, ph);
+  gl.uniform2f(ctdDownUni.texel, 1 / w, 1 / h);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, ctdP[0].fb);
+  gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, src);
+  gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+
+  // 2. The two blurs. Sigmas are the reference's, expressed at pyramid scale.
+  blurPyr(ctdP[0].tex, ctdP[1], ctdP[3], maxDim * 0.04 / CTD_DIV, pw, ph);
+  blurPyr(ctdP[0].tex, ctdP[2], ctdP[3], maxDim * 0.01 / CTD_DIV, pw, ph);
+
+  // 3. Dark channel, only when dehaze is actually asking for one.
+  var atmos = 0.5;
+  if (Math.abs(p.dehaze || 0) >= 1) {
+    var rad = Math.max(15, maxDim / 50) / CTD_DIV;
+    gl.useProgram(ctdMinProg);
+    gl.uniform1f(ctdMinUni.rad, rad);
+    gl.viewport(0, 0, pw, ph);
+    gl.uniform2f(ctdMinUni.step, 1 / pw, 0);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, ctdP[3].fb);
+    gl.bindTexture(gl.TEXTURE_2D, ctdP[0].tex);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    gl.uniform2f(ctdMinUni.step, 0, 1 / ph);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, ctdP[0].fb);
+    gl.bindTexture(gl.TEXTURE_2D, ctdP[3].tex);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    atmos = ctdAtmosphere(ctdP[0], pw, ph);
+  }
+
+  // 4. Apply at full resolution.
+  gl.useProgram(ctdApplyProg);
+  gl.viewport(0, 0, w, h);
+  gl.uniform2f(ctdApplyUni.texel, 1 / w, 1 / h);
+  gl.uniform1f(ctdApplyUni.clarity, ctdAmt(p.clarity));
+  gl.uniform1f(ctdApplyUni.texture, ctdAmt(p.texture));
+  gl.uniform1f(ctdApplyUni.dehaze, (p.dehaze || 0) / 100);
+  gl.uniform1f(ctdApplyUni.atmos, atmos);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, ctdT.fb);
+  gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, src);
+  gl.activeTexture(gl.TEXTURE6); gl.bindTexture(gl.TEXTURE_2D, ctdP[1].tex);
+  gl.activeTexture(gl.TEXTURE7); gl.bindTexture(gl.TEXTURE_2D, ctdP[2].tex);
+  gl.activeTexture(gl.TEXTURE8); gl.bindTexture(gl.TEXTURE_2D, ctdP[0].tex);
+  gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+
+  ctdActiveTex = ctdT.tex;
+  ctdSig = sig;
+}
+
+/* Atmospheric light: the reference averages the brightest 0.1% of the dark
+ * channel. Read the pyramid back once - it is a few thousand pixels, and the
+ * value only has to be about right; a wrong A shows up as a colour cast in the
+ * recovered image, not as a missed haze. */
+function ctdAtmosphere(t, pw, ph) {
+  try {
+    var buf = new Float32Array(pw * ph * 4);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, t.fb);
+    gl.readPixels(0, 0, pw, ph, gl.RGBA, gl.FLOAT, buf);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    var n = pw * ph, want = Math.max(1, Math.round(n * 0.001));
+    var vals = new Float32Array(n);
+    for (var i = 0; i < n; i++) vals[i] = buf[i * 4 + 1];
+    vals.sort();
+    var sum = 0;
+    for (var k = n - want; k < n; k++) sum += vals[k];
+    return Math.max(0.1, Math.min(1.0, sum / want));
+  } catch (e) {
+    return 0.5;
+  }
+}
+
 var shT = null, shSig = '', shActiveTex = null, shSrcAtBuild = null;
 function ensureShTarget(w, h) {
   if (shT && shT.w === w && shT.h === h) return true;
@@ -3148,7 +3513,7 @@ function render() {
   resizeCanvas();
   computeFace();      // refresh the face-baked base (Smile Detect) if its params changed
   computeDenoise();   // refresh the denoised source texture if denoise params changed
-  computeSharpen();   // ... then sharpen it, same cache contract
+  computeCtd(); computeSharpen();   // ... then local contrast + sharpen, same cache contract
   // While the crop tool is active, show the whole image at fit (the crop
   // rectangle is an HTML overlay); otherwise render the committed crop.
   var activeCrop = state.cropping ? FULL_CROP : state.crop;
@@ -3363,7 +3728,7 @@ function autoSample() {
   var h = ar >= 1 ? Math.round(AUTO_MAX / ar) : AUTO_MAX;
   w = Math.max(16, Math.min(AUTO_MAX, w));
   h = Math.max(16, Math.min(AUTO_MAX, h));
-  computeFace(); computeDenoise(); computeSharpen();   // sample the same source the grade reads
+  computeFace(); computeDenoise(); computeCtd(); computeSharpen();   // sample the same source the grade reads
   gl.bindFramebuffer(gl.FRAMEBUFFER, autoFB.fbo);
   gl.disable(gl.SCISSOR_TEST);
   gl.disable(gl.BLEND);
@@ -4079,7 +4444,7 @@ async function applyFullRes(want) {
 /* Slider construction */
 var sliderInputs = {};
 // Per-group bypass (eye toggle). A disabled group renders its params at default.
-var groupEnabled = { Light: true, Color: true, Effects: true, Denoise: true, Grain: true, LUT: true, Face: true };
+var groupEnabled = { Light: true, Color: true, Detail: true, Effects: true, Denoise: true, Grain: true, LUT: true, Face: true };
 var eyeSyncs = [];        // per-eye refresh fns, so undo/redo can resync every eye button
 var PARAM_GROUP = {}, PARAM_DEF = {}, PARAM_LABEL = {};
 var groupTitleEls = {};   // group name -> its title <span> (for the A/B "changed" marker)
@@ -5148,7 +5513,7 @@ function renderExportCanvas() {
 
   computeFace();      // bake Smile Detect into the export at its native resolution
   computeDenoise();   // bake denoise into the export at its native resolution
-  computeSharpen();   // ... and sharpen, same pass the preview ran
+  computeCtd(); computeSharpen();   // ... and the same detail passes the preview ran
 
   var tex = gl.createTexture();
   gl.bindTexture(gl.TEXTURE_2D, tex);

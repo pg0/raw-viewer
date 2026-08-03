@@ -1863,6 +1863,9 @@ var SLIDER_GROUPS = [
     { id: 'halKnee',   label: 'Highlights only', min: 0, max: 95, step: 1, def: 0,
       tip: 'Only what is brighter than this halates. 0 = everything, which is what really happens.',
       fmt: function (v) { return v.toFixed(0); } },
+    { id: 'halPunch',  label: 'Blown lights', min: 0, max: 100, step: 1, def: 0,
+      tip: 'A blown-out light records only that it hit the sensor ceiling, not how far past it went. Raise this so lamps and neon halate like the lights they were instead of like a white wall.',
+      fmt: function (v) { return v.toFixed(0); } },
     { id: 'halTail',   label: 'Haze reach', min: 0.5, max: 20, step: 0.1, def: 4,
       tip: 'How far the soft haze spreads beyond the ring.',
       fmt: function (v) { return v.toFixed(1) + ' %'; } },
@@ -2442,8 +2445,12 @@ var HAL_DOWN_FRAG = [
   'uniform vec2 u_texel;',   // 1/w, 1/h of the SOURCE
   'uniform float u_div;',    // pyramid divisor
   'uniform float u_knee;',   // 0 = every photon halates, which is the physical case
+  'uniform float u_punch;',  // how far past the sensor ceiling the blown sources are taken to be
+  'uniform vec2 u_probe;',   // half-width of the blown-region probe, in uv
   'void main() {',
   '  vec3 acc = vec3(0.0);',
+  '  vec3 accClip = vec3(0.0);',
+  '  float clipN = 0.0;',
   '  float sc = 1.0 / max(1.0 - u_knee, 1e-3);',
   // 4x4 bilinear taps spread across the footprint = 8x8 source texels.
   // The threshold is applied PER TAP, before the average. Applied after, a small
@@ -2454,10 +2461,30 @@ var HAL_DOWN_FRAG = [
   '    for (int x = 0; x < 4; x++) {',
   '      vec2 o = (vec2(float(x), float(y)) + 0.5) / 4.0 - 0.5;',
   '      vec3 s = max(texture(u_src, v_uv + o * u_div * u_texel).rgb, vec3(0.0));',
-  '      acc += max(s - u_knee, vec3(0.0)) * sc;',
+  '      vec3 k = max(s - u_knee, vec3(0.0)) * sc;',
+  '      acc += k;',
+  '      accClip += k * smoothstep(0.90, 0.995, max(s.r, max(s.g, s.b)));',
   '    }',
   '  }',
-  '  frag = vec4(acc / 16.0, 1.0);',
+  // How far past the ceiling is read off how WIDE the blown region is, probed
+  // over a footprint fixed to the frame rather than to the pyramid cell: a
+  // specular glint on a wet leaf is a stop over the top, a street lamp is many,
+  // and only their size on the negative tells them apart. Coarse on purpose -
+  // 16 taps across the probe means a glint catches one tap at most while a lamp
+  // fills it, which is exactly the discrimination being asked for.
+  '  for (int y = 0; y < 4; y++) {',
+  '    for (int x = 0; x < 4; x++) {',
+  '      vec2 o = (vec2(float(x), float(y)) + 0.5) / 4.0 - 0.5;',
+  '      vec3 p = texture(u_src, v_uv + o * u_probe).rgb;',
+  '      clipN += smoothstep(0.90, 0.995, max(p.r, max(p.g, p.b)));',
+  '    }',
+  '  }',
+  // For a power-law glare skirt the peak intensity goes as the clipped RADIUS
+  // cubed, and radius is the square root of area, hence area^1.5. Saturates once
+  // the probe is solidly blown, which is the honest limit: past that the file
+  // records nothing that could tell three stops over from six.
+  '  float f = clipN / 16.0;',
+  '  frag = vec4((acc + u_punch * pow(f, 1.5) * accClip) / 16.0, 1.0);',
   '}'
 ].join('\n');
 
@@ -3142,7 +3169,9 @@ function initGL() {
     src: gl.getUniformLocation(halDownProg, 'u_src'),
     texel: gl.getUniformLocation(halDownProg, 'u_texel'),
     div: gl.getUniformLocation(halDownProg, 'u_div'),
-    knee: gl.getUniformLocation(halDownProg, 'u_knee')
+    knee: gl.getUniformLocation(halDownProg, 'u_knee'),
+    punch: gl.getUniformLocation(halDownProg, 'u_punch'),
+    probe: gl.getUniformLocation(halDownProg, 'u_probe')
   };
   gl.useProgram(halDownProg); gl.uniform1i(halDownUni.src, 0);
 
@@ -3807,6 +3836,17 @@ var HAL_MAX_ANG = 48;
  * the ring lands where the slider says, for four times the pyramid area - which
  * is 1.5 ms against 0.3 ms, so it is not a real cost. */
 var HAL_RC_PYR = 8.0;
+/* Ceiling on the blown-light extrapolation, as a multiplier on the censored
+ * energy. A sensor records a blown pixel as "at least 1.0" and nothing more, so
+ * the frame cannot say how far past the ceiling a lamp went; film had no such
+ * ceiling and halates on the light that was really there. 16x is four stops,
+ * which covers a street lamp or a neon tube in an otherwise correctly exposed
+ * night frame. Higher would be arguing with the picture rather than reading it. */
+var HAL_PUNCH_MAX = 15.0;   // gain = 1 + 15 = 16x at the top of the slider
+// How wide a blown region has to be to be read as a light rather than a glint,
+// as a fraction of the long edge. 1.2% is 72 px on a 6000 px frame, about a
+// street lamp; a specular on chrome or water is an order of magnitude smaller.
+var HAL_PROBE_FRAC = 0.012;
 // Fitted once to exp(-r/L)/L, the tail's energy per unit radius. Scale-free, so
 // the same three numbers hold for any tail length. Relative rms 0.274, and no
 // negative lobe anywhere - the tail stays a tail.
@@ -3951,7 +3991,7 @@ function computeHalation() {
   if (!ensureHalTargets(w, h, div)) return;
   var src = halSrcTex();
   halSrcAtBuild = src;
-  var sig = [texId(state.tex), w, h, p.halation, p.halKnee, p.halWarm, p.halRing,
+  var sig = [texId(state.tex), w, h, p.halation, p.halKnee, p.halPunch, p.halWarm, p.halRing,
     p.halTail, p.halBal, p.halAh, p.sharpness, p.clarity, p.texture, p.dehaze,
     p.nrLuma, p.nrColor, faceDnKey()].join(':');
   if (sig === halSig) { halActiveTex = halT.tex; return; }
@@ -3967,6 +4007,11 @@ function computeHalation() {
   gl.uniform2f(halDownUni.texel, 1 / w, 1 / h);
   gl.uniform1f(halDownUni.div, div);
   gl.uniform1f(halDownUni.knee, Math.min(0.95, (p.halKnee || 0) / 100));
+  gl.uniform1f(halDownUni.punch, (p.halPunch || 0) / 100 * HAL_PUNCH_MAX);
+  // Probe span as a fraction of the long edge, so "how big is this light" means
+  // the same thing on a phone JPEG and on a 60 MP frame.
+  var probe = HAL_PROBE_FRAC * maxDim;
+  gl.uniform2f(halDownUni.probe, probe / w, probe / h);
   gl.bindFramebuffer(gl.FRAMEBUFFER, halP[0].fb);
   gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, src);
   gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
@@ -5775,23 +5820,23 @@ var toneModeSelect = null;
  * right thing to HAVE and the wrong thing to open a panel with - the presets
  * are the interface, the sliders are what you reach for once a preset is close
  * but not right. */
-var HAL_PRESET_IDS = ['halation', 'halKnee', 'halWarm', 'halRing', 'halTail', 'halBal', 'halAh'];
+var HAL_PRESET_IDS = ['halation', 'halKnee', 'halPunch', 'halWarm', 'halRing', 'halTail', 'halBal', 'halAh'];
 /* Four looks rather than four points on one axis: they differ in warm/neutral,
  * ring/haze, tight/wide and backed/unbacked, so switching between them is a
  * real choice and not a strength control in disguise. */
 var HAL_PRESETS = [
   { id: 'neon', label: 'Neon night',
     hint: 'Point sources at night on a stock with the backing stripped. Tight red-orange ring, midtones left alone.',
-    v: { halation: 60, halKnee: 60, halWarm: 130, halRing: 0.7, halTail: 3.5, halBal: 80, halAh: 0 } },
+    v: { halation: 60, halKnee: 60, halPunch: 75, halWarm: 130, halRing: 0.7, halTail: 3.5, halBal: 80, halAh: 0 } },
   { id: 'bloom', label: 'Gentle bloom',
     hint: 'Daylight, backing intact - a whisper on the speculars only. The 65 backing leaves 12% of the energy, which is what a backed stock actually shows.',
-    v: { halation: 20, halKnee: 35, halWarm: 100, halRing: 0.5, halTail: 3.0, halBal: 55, halAh: 65 } },
+    v: { halation: 20, halKnee: 35, halPunch: 15, halWarm: 100, halRing: 0.5, halTail: 3.0, halBal: 55, halAh: 65 } },
   { id: 'antique', label: 'Antique haze',
     hint: 'Thick-base plate era: milky veiling off windows and sky, almost no ring, near-neutral colour.',
-    v: { halation: 50, halKnee: 15, halWarm: 30, halRing: 3.0, halTail: 12, halBal: 15, halAh: 0 } },
+    v: { halation: 50, halKnee: 15, halPunch: 0, halWarm: 30, halRing: 3.0, halTail: 12, halBal: 15, halAh: 0 } },
   { id: 'backlit', label: 'Backlit portrait',
     hint: 'Contre-jour and window light. Restricted to the source itself so skin edges wrap without going orange.',
-    v: { halation: 35, halKnee: 70, halWarm: 85, halRing: 2.2, halTail: 7, halBal: 45, halAh: 25 } }
+    v: { halation: 35, halKnee: 70, halPunch: 40, halWarm: 85, halRing: 2.2, halTail: 7, halBal: 45, halAh: 25 } }
 ];
 var halPresetBtns = [];
 var halApplyingPreset = false;
@@ -5856,7 +5901,7 @@ function halMatchPreset() {
   // Amount, Halo size and Warmth stay out front: after "how much", the two
   // edits anyone actually makes are bigger/smaller and redder/whiter, and
   // neither is reachable by switching presets without moving five other things.
-  ['halKnee', 'halTail', 'halBal', 'halAh'].forEach(function (id) {
+  ['halKnee', 'halPunch', 'halTail', 'halBal', 'halAh'].forEach(function (id) {
     if (sliderInputs[id]) adv.appendChild(sliderInputs[id].row);
   });
   panel.appendChild(adv);

@@ -1871,9 +1871,6 @@ var SLIDER_GROUPS = [
       fmt: function (v) { return v.toFixed(1) + ' %'; } },
     { id: 'halBal',    label: 'Ring vs haze', min: 0, max: 100, step: 1, def: 65,
       tip: '100 = a crisp ring, 0 = soft glow only.',
-      fmt: function (v) { return v.toFixed(0); } },
-    { id: 'halAh',     label: 'Backing',   min: 0, max: 100, step: 1, def: 0,
-      tip: 'The anti-halation coating that suppresses the effect. 100 = fully suppressed. Mostly here so the presets can tell a physical story.',
       fmt: function (v) { return v.toFixed(0); } }
   ]},
   { group: 'Denoise', items: [
@@ -3960,7 +3957,7 @@ function halRingTaps(rcPyr) {
 function halationActive() {
   var p = state.params;
   return !!(state.tex && halApplyProg && dnFloatOK && groupEnabled.Halation &&
-    (p.halation || 0) >= 1 && (p.halAh || 0) < 100);
+    (p.halation || 0) >= 1);
 }
 
 function ensureHalTargets(w, h, div) {
@@ -3992,7 +3989,7 @@ function computeHalation() {
   var src = halSrcTex();
   halSrcAtBuild = src;
   var sig = [texId(state.tex), w, h, p.halation, p.halKnee, p.halPunch, p.halWarm, p.halRing,
-    p.halTail, p.halBal, p.halAh, p.sharpness, p.clarity, p.texture, p.dehaze,
+    p.halTail, p.halBal, p.sharpness, p.clarity, p.texture, p.dehaze,
     p.nrLuma, p.nrColor, faceDnKey()].join(':');
   if (sig === halSig) { halActiveTex = halT.tex; return; }
 
@@ -4051,11 +4048,14 @@ function computeHalation() {
     prev = dst[i];
   }
 
-  // 4. Composite at full resolution. The anti-halation layer absorbs on the way
-  //    down AND on the way back up, hence the square. Full strength is HAL_RETURN,
-  //    the share the geometry actually sends back, so the top of the slider is
-  //    the physical ceiling rather than a number picked to look reasonable.
-  var ah = Math.min(1, Math.max(0, (p.halAh || 0) / 100));
+  // 4. Composite at full resolution. Full strength is HAL_RETURN, the share the
+  //    geometry actually sends back, so the top of the slider is the physical
+  //    ceiling rather than a number picked to look reasonable.
+  //    An anti-halation backing used to sit here as its own slider, absorbing on
+  //    the way down and again on the way back up. It was a scalar multiplying the
+  //    same composite Amount multiplies - a second strength control that only
+  //    ever went down, and two controls for one quantity is one too many. The
+  //    presets carry the backing they meant in their Amount.
   var kw = (p.halWarm == null ? 115 : p.halWarm) / 100;
   var haloRing = halWeights(kw);
   var haloTail = halWeights(kw / 3);   // the tail never made the round trip
@@ -4064,7 +4064,7 @@ function computeHalation() {
   gl.uniform3f(halApplyUni.tailC, HAL_TAIL_C[0], HAL_TAIL_C[1], HAL_TAIL_C[2]);
   gl.uniform3f(halApplyUni.haloRing, haloRing[0], haloRing[1], haloRing[2]);
   gl.uniform3f(halApplyUni.haloTail, haloTail[0], haloTail[1], haloTail[2]);
-  gl.uniform1f(halApplyUni.amt, (p.halation || 0) / 100 * HAL_RETURN * (1 - ah) * (1 - ah));
+  gl.uniform1f(halApplyUni.amt, (p.halation || 0) / 100 * HAL_RETURN);
   gl.uniform1f(halApplyUni.bal, Math.min(1, Math.max(0, (p.halBal == null ? 65 : p.halBal) / 100)));
   gl.bindFramebuffer(gl.FRAMEBUFFER, halT.fb);
   gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, src);
@@ -5820,23 +5820,23 @@ var toneModeSelect = null;
  * right thing to HAVE and the wrong thing to open a panel with - the presets
  * are the interface, the sliders are what you reach for once a preset is close
  * but not right. */
-var HAL_PRESET_IDS = ['halation', 'halKnee', 'halPunch', 'halWarm', 'halRing', 'halTail', 'halBal', 'halAh'];
+var HAL_PRESET_IDS = ['halation', 'halKnee', 'halPunch', 'halWarm', 'halRing', 'halTail', 'halBal'];
 /* Four looks rather than four points on one axis: they differ in warm/neutral,
- * ring/haze, tight/wide and backed/unbacked, so switching between them is a
- * real choice and not a strength control in disguise. */
+ * ring/haze, tight/wide and glint/lamp, so switching between them is a real
+ * choice and not a strength control in disguise. */
 var HAL_PRESETS = [
   { id: 'neon', label: 'Neon night',
     hint: 'Point sources at night on a stock with the backing stripped. Tight red-orange ring, midtones left alone.',
-    v: { halation: 60, halKnee: 60, halPunch: 75, halWarm: 130, halRing: 0.7, halTail: 3.5, halBal: 80, halAh: 0 } },
+    v: { halation: 60, halKnee: 60, halPunch: 75, halWarm: 130, halRing: 0.7, halTail: 3.5, halBal: 80 } },
   { id: 'bloom', label: 'Gentle bloom',
-    hint: 'Daylight, backing intact - a whisper on the speculars only. The 65 backing leaves 12% of the energy, which is what a backed stock actually shows.',
-    v: { halation: 20, halKnee: 35, halPunch: 15, halWarm: 100, halRing: 0.5, halTail: 3.0, halBal: 55, halAh: 65 } },
+    hint: 'Daylight on a backed stock - a whisper on the speculars only, tight and near-neutral.',
+    v: { halation: 10, halKnee: 35, halPunch: 15, halWarm: 100, halRing: 0.5, halTail: 3.0, halBal: 55 } },
   { id: 'antique', label: 'Antique haze',
     hint: 'Thick-base plate era: milky veiling off windows and sky, almost no ring, near-neutral colour.',
-    v: { halation: 50, halKnee: 15, halPunch: 0, halWarm: 30, halRing: 3.0, halTail: 12, halBal: 15, halAh: 0 } },
+    v: { halation: 50, halKnee: 15, halPunch: 0, halWarm: 30, halRing: 3.0, halTail: 12, halBal: 15 } },
   { id: 'backlit', label: 'Backlit portrait',
     hint: 'Contre-jour and window light. Restricted to the source itself so skin edges wrap without going orange.',
-    v: { halation: 35, halKnee: 70, halPunch: 40, halWarm: 85, halRing: 2.2, halTail: 7, halBal: 45, halAh: 25 } }
+    v: { halation: 20, halKnee: 70, halPunch: 40, halWarm: 85, halRing: 2.2, halTail: 7, halBal: 45 } }
 ];
 var halPresetBtns = [];
 var halApplyingPreset = false;
@@ -5901,7 +5901,7 @@ function halMatchPreset() {
   // Amount, Halo size and Warmth stay out front: after "how much", the two
   // edits anyone actually makes are bigger/smaller and redder/whiter, and
   // neither is reachable by switching presets without moving five other things.
-  ['halKnee', 'halPunch', 'halTail', 'halBal', 'halAh'].forEach(function (id) {
+  ['halKnee', 'halPunch', 'halTail', 'halBal'].forEach(function (id) {
     if (sliderInputs[id]) adv.appendChild(sliderInputs[id].row);
   });
   panel.appendChild(adv);
